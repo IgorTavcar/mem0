@@ -1,0 +1,334 @@
+<h1>Memory Engine</h1>
+<p class="lead">The Memory Engine is the OSS core of mem0: the <code>Memory</code> and <code>AsyncMemory</code> classes in <code>mem0/memory/main.py</code> that orchestrate embedding, vector storage, LLM-driven extraction, entity linking, and a local SQLite change log. Both classes implement the same public surface (<code>add</code>, <code>search</code>, <code>get</code>, <code>get_all</code>, <code>update</code>, <code>delete</code>, <code>delete_all</code>, <code>history</code>, <code>reset</code>) on top of the abstract <code>MemoryBase</code>; <code>AsyncMemory</code> is a near line-for-line mirror that offloads every blocking call to a thread pool via <code>asyncio.to_thread</code>. This page documents construction, every public method's signature and semantics, the concurrency model, the SQLite history/messages schema, session scoping rules, metadata handling, the <code>infer=False</code> raw path, and the gotchas around required identifiers and filter placement.</p>
+
+<section id="overview">
+<h2>Overview &amp; placement</h2>
+<p>The engine is the in-process implementation behind <code>from mem0 import Memory</code>. It wires four pluggable layers together via factories and adds local persistence plus telemetry.</p>
+<ul>
+  <li><strong>Two classes, one contract.</strong> <code>Memory</code> (sync) and <code>AsyncMemory</code> (async) both extend <code>MemoryBase</code> (<code>mem0/memory/base.py</code>) and expose identical method names. They are exported at the package root in <code>mem0/__init__.py</code> as <code>Memory, AsyncMemory</code>.</li>
+  <li><strong>Composed dependencies.</strong> On construction each instance creates an <em>embedding model</em>, <em>vector store</em>, <em>LLM</em>, optional <em>reranker</em>, a lazily-built <em>entity store</em>, and a <code>SQLiteManager</code> for history. See <a href="config-system.html">the configuration system</a> for how the four factories resolve providers.</li>
+  <li><strong>Where it sits.</strong> The hosted <a href="client-sdk.html">MemoryClient</a> talks to a remote API and does <em>not</em> use this engine; the <a href="server.html">self-hosted server</a> and CLI wrap this engine. For the algorithmic detail of what happens inside <code>add</code>/<code>search</code> see <a href="memory-algorithm.html">the memory algorithm</a> and the <a href="data-flow.html">end-to-end data flow</a>.</li>
+</ul>
+
+<pre class="mermaid">flowchart LR
+  U[Caller] --> M[Memory / AsyncMemory]
+  M --> EF[EmbedderFactory]
+  M --> VF[VectorStoreFactory]
+  M --> LF[LlmFactory]
+  M --> RF[RerankerFactory optional]
+  M --> DB[SQLiteManager history.db]
+  M --> ES[entity_store lazy]
+  EF --> EMB[Embedding model]
+  VF --> VS[Vector store]
+  VF --> ES
+  LF --> LLM[LLM]
+  M --> T[telemetry capture_event]
+</pre>
+
+<aside class="callout insight"><strong>Insight</strong> The engine never imports a concrete provider. Everything is constructed through <code>EmbedderFactory</code>, <code>VectorStoreFactory</code>, <code>LlmFactory</code>, and <code>RerankerFactory</code> from <code>mem0/utils/factory.py</code>, so swapping a provider is purely a config change.</aside>
+</section>
+
+<section id="construction">
+<h2>Construction</h2>
+<p>There are two ways to build an instance: pass a typed <code>MemoryConfig</code>, or pass a plain dict to the <code>from_config</code> classmethod.</p>
+
+<h3>Memory(config)</h3>
+<p>The constructor takes a single <code>MemoryConfig</code> (defaulting to <code>MemoryConfig()</code>, an all-defaults config) and eagerly builds every dependency:</p>
+<pre><code class="language-python">from mem0 import Memory
+m = Memory()                       # all defaults
+m = Memory(MemoryConfig(...))      # typed config object</code></pre>
+<p>During <code>__init__</code> the engine:</p>
+<dl>
+  <dt><code>self.embedding_model</code></dt><dd><code>EmbedderFactory.create(provider, embedder_config, vector_store_config)</code> — the vector-store config is also passed so the embedder can align dimensions.</dd>
+  <dt><code>self.vector_store</code></dt><dd><code>VectorStoreFactory.create(provider, vs_config)</code>. See <a href="vector-stores.html">vector stores</a>.</dd>
+  <dt><code>self.llm</code></dt><dd><code>LlmFactory.create(provider, llm_config)</code>. See <a href="llms.html">LLM providers</a>.</dd>
+  <dt><code>self.db</code></dt><dd><code>SQLiteManager(config.history_db_path)</code> — the local change log (default <code>~/.mem0/history.db</code>).</dd>
+  <dt><code>self.reranker</code></dt><dd><code>None</code> unless <code>config.reranker</code> is set, in which case <code>RerankerFactory.create(...)</code>. See <a href="rerankers.html">rerankers</a>.</dd>
+  <dt><code>self._entity_store</code></dt><dd>Set to <code>None</code>; built lazily on first access (see below).</dd>
+  <dt><code>self.collection_name</code>, <code>self.api_version</code>, <code>self.custom_instructions</code></dt><dd>Cached from config; <code>api_version</code> defaults to <code>"v1.1"</code>.</dd>
+</dl>
+
+<h3>Memory.from_config(config_dict)</h3>
+<p>Accepts a plain dict, validates it into a <code>MemoryConfig</code>, and constructs the instance. This is the path used by the CLI/server and most examples.</p>
+<pre><code class="language-python">m = Memory.from_config({
+    "llm": {"provider": "openai", "config": {"model": "gpt-4o-mini"}},
+    "vector_store": {"provider": "qdrant", "config": {"path": "/tmp/qd"}},
+})</code></pre>
+<aside class="callout gotcha"><strong>Gotcha</strong> <code>from_config</code> calls <code>cls._process_config(config_dict)</code> and then <code>MemoryConfig(**config_dict)</code> — but <code>_process_config</code> is currently a pass-through that simply returns its input. The real validation is the <code>MemoryConfig(**config_dict)</code> pydantic call, which raises (and re-raises after logging) <code>pydantic.ValidationError</code> on a malformed config.</aside>
+
+<h3>The lazy entity store</h3>
+<p>The <code>entity_store</code> property clones the vector-store config, points it at a separate collection named <code>{collection_name}_entities</code>, and builds a second vector store on first use. Entities (people, places, things extracted from memory text) live here with a <code>linked_memory_ids</code> payload, powering the entity-boost signal in <a href="memory-algorithm.html#multi-signal-retrieval">retrieval</a>.</p>
+<aside class="callout decision"><strong>Decision</strong> For the <code>qdrant</code> provider in embedded mode the entity store reuses the primary store's <code>client</code> object rather than opening a second connection, explicitly to avoid RocksDB lock contention on the same on-disk path.</aside>
+
+<details><summary>Deep dive: telemetry vector store &amp; <code>_safe_deepcopy_config</code></summary>
+<p>When telemetry is enabled the constructor also builds a throwaway <code>_telemetry_vector_store</code> bound to a collection literally named <code>"mem0migrations"</code> (for FAISS/Qdrant it gets its own <code>migrations_&lt;provider&gt;</code> path under <code>~/.mem0</code>). Cloning the config uses <code>_safe_deepcopy_config</code>, which falls back to dict-based reconstruction when a plain <code>deepcopy</code> fails (e.g. configs holding thread locks or non-serializable auth objects). During that fallback, runtime auth fields in <code>_RUNTIME_FIELDS</code> (<code>http_auth</code>, <code>auth</code>, <code>connection_class</code>, <code>ssl_context</code>) are preserved, while anything matching <code>_SENSITIVE_FIELDS_EXACT</code> or the sensitive suffixes (<code>_password</code>, <code>_secret</code>, <code>_token</code>, <code>_credential(s)</code>) is redacted to <code>None</code>.</p>
+</details>
+</section>
+
+<section id="public-methods">
+<h2>Public methods</h2>
+<p>All nine public methods exist on both classes with identical signatures; the async variants are coroutines. <code>MemoryBase</code> only declares <code>get</code>, <code>get_all</code>, <code>update</code>, <code>delete</code>, <code>history</code> as abstract — <code>add</code>, <code>search</code>, <code>delete_all</code>, <code>reset</code> are concrete additions.</p>
+
+<table>
+  <thead><tr><th>Method</th><th>Signature (sync)</th><th>Returns</th></tr></thead>
+  <tbody>
+    <tr><td><code>add</code></td><td><code>add(messages, *, user_id=None, agent_id=None, run_id=None, metadata=None, infer=True, memory_type=None, prompt=None)</code></td><td><code>{"results": [{"id","memory","event"}, ...]}</code></td></tr>
+    <tr><td><code>search</code></td><td><code>search(query, *, top_k=20, filters=None, threshold=0.1, rerank=False)</code></td><td><code>{"results": [{"id","memory","score", ...}]}</code></td></tr>
+    <tr><td><code>get</code></td><td><code>get(memory_id)</code></td><td>single memory dict or <code>None</code></td></tr>
+    <tr><td><code>get_all</code></td><td><code>get_all(*, filters=None, top_k=20)</code></td><td><code>{"results": [...]}</code></td></tr>
+    <tr><td><code>update</code></td><td><code>update(memory_id, data, metadata=None)</code></td><td><code>{"message": "Memory updated successfully!"}</code></td></tr>
+    <tr><td><code>delete</code></td><td><code>delete(memory_id)</code></td><td><code>{"message": "Memory deleted successfully!"}</code></td></tr>
+    <tr><td><code>delete_all</code></td><td><code>delete_all(user_id=None, agent_id=None, run_id=None)</code></td><td><code>{"message": "Memories deleted successfully!"}</code></td></tr>
+    <tr><td><code>history</code></td><td><code>history(memory_id)</code></td><td>list of change rows (newest-ordered)</td></tr>
+    <tr><td><code>reset</code></td><td><code>reset()</code></td><td><code>None</code></td></tr>
+  </tbody>
+</table>
+
+<aside class="callout gotcha"><strong>Gotcha — keyword-only identifiers.</strong> In <code>add</code>, <code>search</code>, and <code>get_all</code> the <code>*</code> in the signature forces every identifier and option to be keyword-only. <code>add</code> still accepts <code>user_id=/agent_id=/run_id=</code> directly, but <code>search</code> and <code>get_all</code> require them <em>inside</em> <code>filters=</code> — passing them as top-level kwargs raises <code>ValueError</code> via <code>_reject_top_level_entity_params</code>.</aside>
+
+<h3>add()</h3>
+<p>Ingests messages and writes memories. <code>messages</code> may be a <code>str</code> (wrapped as a single user message), a single dict, or a list of <code>{"role","content"}</code> dicts; anything else raises <code>Mem0ValidationError</code> (<code>VALIDATION_003</code>). Flow:</p>
+<ol>
+  <li><code>_build_filters_and_metadata(...)</code> produces a storage metadata template and effective query filters, and <strong>requires at least one of <code>user_id</code>/<code>agent_id</code>/<code>run_id</code></strong> (else <code>Mem0ValidationError VALIDATION_001</code>).</li>
+  <li>If <code>memory_type</code> is set it must equal <code>MemoryType.PROCEDURAL.value</code> (<code>"procedural_memory"</code>); any other value raises <code>VALIDATION_002</code>. When both <code>agent_id</code> and procedural type are present, <code>_create_procedural_memory</code> runs instead of the normal pipeline.</li>
+  <li>Vision parsing runs (image content is described via the LLM when <code>enable_vision</code> is configured).</li>
+  <li><code>_add_to_vector_store(...)</code> performs either the raw path (<code>infer=False</code>) or the full V3 phased batch pipeline.</li>
+</ol>
+<aside class="callout insight"><strong>Insight — single-pass, ADD-only extraction.</strong> The inference path issues exactly <em>one</em> LLM call producing a JSON <code>{"memory": [...]}</code> list, then batch-embeds, hash-dedupes, batch-inserts, batch-writes history, and batch-links entities. Unlike older mem0, the engine no longer asks the LLM to emit UPDATE/DELETE operations during <code>add</code>; it only ADDs new facts and relies on md5-hash dedup against existing memories. See <a href="memory-algorithm.html#single-pass-add">the algorithm</a>.</aside>
+
+<details><summary>Deep dive: the eight phases of <code>_add_to_vector_store</code></summary>
+<ul>
+  <li><strong>Phase 0 — context:</strong> reads the last 10 messages for this session scope from SQLite, and flattens the new messages with <code>parse_messages</code>.</li>
+  <li><strong>Phase 1 — existing retrieval:</strong> embeds the parsed messages and does a <code>top_k=10</code> vector search scoped by entity filters; existing memory UUIDs are remapped to integer indices ("anti-hallucination" so the LLM can't echo back real IDs).</li>
+  <li><strong>Phase 2 — extraction:</strong> one LLM call with <code>ADDITIVE_EXTRACTION_PROMPT</code> (plus <code>AGENT_CONTEXT_SUFFIX</code> when the scope is agent-only), <code>response_format={"type":"json_object"}</code>. Robust parse: <code>remove_code_blocks</code> → <code>json.loads</code> → fallback <code>extract_json</code>.</li>
+  <li><strong>Phase 3 — batch embed</strong> all extracted texts (<code>embed_batch</code>, falling back to per-item embed).</li>
+  <li><strong>Phases 4–5 — per-memory metadata + md5 hash dedup</strong> against existing payload hashes and within the batch.</li>
+  <li><strong>Phase 6 — batch persist</strong> to the vector store and <code>batch_add_history</code> as <code>ADD</code> events (with per-item insert fallback).</li>
+  <li><strong>Phase 7 — batch entity linking:</strong> <code>extract_entities_batch</code>, global dedup, batch-embed entities, batch-search the entity store, and split into updates (existing match ≥ 0.95) vs new inserts.</li>
+  <li><strong>Phase 8 — save messages</strong> to SQLite and fire the <code>mem0.add</code> telemetry event.</li>
+</ul>
+<p>If the LLM call fails, or extraction yields nothing, or all candidates are deduped, the method still persists the raw messages (<code>save_messages</code>) and returns <code>[]</code> — no exception is raised.</p>
+</details>
+
+<h3>search()</h3>
+<p>Multi-signal hybrid retrieval. After validating <code>threshold</code> (must be in [0,1]) and <code>top_k</code> (non-negative int) and confirming filters carry an entity id, it delegates to <code>_search_vector_store</code>, which fuses semantic similarity, normalized BM25 keyword scores, and entity boosts via <code>score_and_rank</code>. It over-fetches an internal pool of <code>max(top_k*4, 60)</code> candidates before truncating to <code>top_k</code>. Optional <code>rerank=True</code> applies the configured reranker. The query-side metadata DSL (operators like <code>eq/ne/gt/in/contains</code> and <code>AND/OR/NOT</code>) is detected by <code>_has_advanced_operators</code> and rewritten by <code>_process_metadata_filters</code> into a vector-store-agnostic shape (<code>$or</code>/<code>$not</code> for logical groups). Full scoring detail lives in <a href="memory-algorithm.html#multi-signal-retrieval">the algorithm</a>.</p>
+
+<h3>get() / get_all()</h3>
+<p><code>get(memory_id)</code> fetches one record from the vector store and reshapes its payload into a <code>MemoryItem</code> dict, promoting <code>user_id/agent_id/run_id/actor_id/role</code> to top level and bundling everything else under <code>metadata</code>. Returns <code>None</code> if not found. <code>get_all(*, filters, top_k=20)</code> lists memories for a scope; both methods strip the internal <code>text_lemmatized</code>, <code>hash</code>, <code>data</code> keys out of the user-facing <code>metadata</code>.</p>
+
+<h3>update()</h3>
+<p><code>update(memory_id, data, metadata=None)</code> re-embeds <code>data</code>, overwrites the vector-store record, writes an <code>UPDATE</code> history row carrying the previous text, and refreshes entity links. It <em>preserves</em> the original <code>created_at</code> and the session identifiers from the existing record (only filling them from the existing payload when not supplied in new metadata) and stamps a fresh <code>updated_at</code>. Raises <code>ValueError</code> if the id is missing.</p>
+
+<h3>delete() / delete_all()</h3>
+<p><code>delete(memory_id)</code> removes the vector record, writes a <code>DELETE</code> history row (<code>is_deleted=1</code>, capturing the prior text), and strips the id from entity records. <code>delete_all(user_id/agent_id/run_id)</code> lists every memory in the scope and deletes them one-by-one; the async variant fans them out with <code>asyncio.gather</code>.</p>
+<aside class="callout gotcha"><strong>Gotcha</strong> <code>delete_all</code> <em>requires</em> at least one identifier. Calling it with no args raises <code>ValueError</code> directing you to use <code>reset()</code> instead — there is no "delete everything" shortcut on this method.</aside>
+
+<h3>history()</h3>
+<p><code>history(memory_id)</code> returns the full ordered change log for one memory directly from SQLite (<code>db.get_history</code>) — a list of rows with <code>old_memory</code>, <code>new_memory</code>, <code>event</code>, timestamps, <code>is_deleted</code>, <code>actor_id</code>, and <code>role</code>.</p>
+
+<h3>reset()</h3>
+<p>Destroys all state: drops the SQLite <code>history</code> table, rebuilds a fresh <code>SQLiteManager</code>, and resets the vector store (via <code>VectorStoreFactory.reset</code> if supported, else <code>delete_col</code> + recreate). The sync variant also resets the entity store; the async variant additionally runs <code>gc.collect()</code> and closes the vector-store client before recreating, to release file handles.</p>
+<aside class="callout perf"><strong>Perf/cleanup note</strong> Both classes also expose a non-abstract <code>close()</code> that closes the SQLite connection, and <code>chat()</code> which is an explicit <code>NotImplementedError</code> placeholder.</aside>
+</section>
+
+<section id="sync-vs-async">
+<h2>Sync vs async &amp; concurrency</h2>
+<p><code>AsyncMemory</code> is a parallel implementation, not a wrapper around <code>Memory</code>. Every method body is duplicated; the only structural difference is that blocking calls are dispatched to a worker thread.</p>
+<ul>
+  <li><strong>Offloading primitive:</strong> all I/O and CPU-bound work — embedding, vector-store ops, LLM calls, SQLite reads/writes, lemmatization, entity extraction — is wrapped in <code>await asyncio.to_thread(fn, ...)</code>. There is no native async client usage; the engine relies on a thread pool to keep the event loop unblocked.</li>
+  <li><strong>Fan-out:</strong> the one place that genuinely parallelizes is async <code>delete_all</code>, which builds a list of <code>_delete_memory</code> coroutines and awaits <code>asyncio.gather(*tasks)</code>.</li>
+  <li><strong>Reranking</strong> in async <code>search</code> is also pushed through <code>asyncio.to_thread</code> so a heavy reranker doesn't stall the loop.</li>
+  <li><strong>Telemetry sync_type:</strong> every <code>capture_event</code> call tags <code>sync_type</code> as <code>"sync"</code> or <code>"async"</code>, the one observable behavioral marker distinguishing the two classes.</li>
+</ul>
+
+<h3>SQLite thread safety</h3>
+<p>The single shared SQLite connection is opened with <code>check_same_thread=False</code> and guarded by a process-local <code>threading.Lock</code> (<code>self._lock</code>) inside <code>SQLiteManager</code>. Every write wraps an explicit <code>BEGIN/COMMIT</code> with <code>ROLLBACK</code> on error. Because <code>asyncio.to_thread</code> dispatches to arbitrary worker threads, this lock is what makes concurrent async DB access safe.</p>
+<aside class="callout gotcha"><strong>Gotcha</strong> The lock is a plain in-process <code>threading.Lock</code>; it does <em>not</em> coordinate across multiple processes or multiple <code>Memory</code> instances pointed at the same <code>history.db</code> file. SQLite-level locking is your only protection in that case.</aside>
+</section>
+
+<section id="sqlite-history">
+<h2>SQLite history &amp; messages (SQLiteManager)</h2>
+<p><code>mem0/memory/storage.py</code> defines <code>SQLiteManager</code>, the local persistence for change history and short-term conversational context. It manages two tables in the <code>history_db_path</code> database (default <code>~/.mem0/history.db</code>; <code>":memory:"</code> is the class default for ephemeral use).</p>
+
+<h3>history table</h3>
+<p>The append-only change log. Schema:</p>
+<pre><code class="language-python">CREATE TABLE history (
+    id           TEXT PRIMARY KEY,   # uuid4 per row
+    memory_id    TEXT,               # the memory this change belongs to
+    old_memory   TEXT,               # previous text (NULL for ADD)
+    new_memory   TEXT,               # new text (NULL for DELETE)
+    event        TEXT,               # 'ADD' | 'UPDATE' | 'DELETE'
+    created_at   DATETIME,
+    updated_at   DATETIME,
+    is_deleted   INTEGER,            # 1 on DELETE rows
+    actor_id     TEXT,
+    role         TEXT
+)</code></pre>
+<dl>
+  <dt>ADD</dt><dd>Written on every new memory (and the batch <code>batch_add_history</code> path). <code>old_memory=NULL</code>, <code>new_memory=text</code>.</dd>
+  <dt>UPDATE</dt><dd>Written by <code>_update_memory</code>. <code>old_memory=prev_value</code>, <code>new_memory=data</code>, preserves original <code>created_at</code>, new <code>updated_at</code>.</dd>
+  <dt>DELETE</dt><dd>Written by <code>_delete_memory</code>. <code>new_memory=NULL</code>, <code>is_deleted=1</code>; the prior text is retained in <code>old_memory</code> so deletions remain auditable.</dd>
+</dl>
+<p><code>get_history</code> returns rows for a <code>memory_id</code> ordered <code>created_at ASC, DATETIME(updated_at) ASC</code> and converts <code>is_deleted</code> back to a bool. <code>batch_add_history</code> uses <code>executemany</code> for the bulk ADD path.</p>
+
+<h3>messages table</h3>
+<p>A rolling short-term context window keyed by <em>session_scope</em>:</p>
+<pre><code class="language-python">CREATE TABLE messages (
+    id TEXT PRIMARY KEY, session_scope TEXT, role TEXT,
+    content TEXT, name TEXT, created_at DATETIME
+)</code></pre>
+<p><code>save_messages</code> inserts the new turn(s) and then evicts everything beyond the most recent 10 rows for that scope (a subquery materializes the ORDER BY before the outer <code>DELETE ... NOT IN</code>). <code>get_last_messages</code> fetches the latest N (default 10) and re-sorts them chronologically for Phase 0 of <code>add</code>.</p>
+<aside class="callout insight"><strong>Insight — deterministic session scope.</strong> The <code>session_scope</code> string is built by <code>_build_session_scope</code> as a sorted, joined key like <code>agent_id=a1&amp;user_id=u1</code>. Sorting the keys makes the scope identifier order-independent so the same logical session always maps to the same message window.</aside>
+
+<h3>Schema migration</h3>
+<p>On every construction, <code>_migrate_history_table</code> inspects the existing <code>history</code> table's columns. If they differ from the expected set, it renames the table to <code>history_old</code>, recreates the new schema, copies the intersecting columns across, and drops the old table — all inside one transaction with rollback on failure. This silently upgrades databases that still carried the old group-chat columns.</p>
+<aside class="callout decision"><strong>Decision</strong> Migration copies only the <em>intersection</em> of old and new columns, so removed columns (the legacy convo fields) are dropped and any new columns are left NULL. It is a best-effort, lossy-by-design forward migration.</aside>
+
+<details><summary>Deep dive: reset semantics differ between classes</summary>
+<p><code>SQLiteManager.reset()</code> drops <em>both</em> <code>history</code> and <code>messages</code> and recreates them. But the engine's <code>Memory.reset()</code> / <code>AsyncMemory.reset()</code> do <em>not</em> call <code>db.reset()</code>; they each drop only the <code>history</code> table, close the connection, and build a brand-new <code>SQLiteManager</code> (whose constructor recreates both tables). The net effect is the same fresh state, but note that <code>SQLiteManager.reset</code> is reachable mainly via its own API.</p>
+</details>
+</section>
+
+<section id="session-scoping">
+<h2>Session scoping &amp; required identifiers</h2>
+<p>Memories are partitioned by three session identifiers plus an actor dimension. The rules are enforced by <code>_build_filters_and_metadata</code> and the per-method validators.</p>
+<dl>
+  <dt><code>user_id</code></dt><dd>End-user scope.</dd>
+  <dt><code>agent_id</code></dt><dd>Agent scope; when present <em>without</em> <code>user_id</code> the extraction prompt switches to agent-context mode (<code>AGENT_CONTEXT_SUFFIX</code>). Required for procedural memories.</dd>
+  <dt><code>run_id</code></dt><dd>Run/conversation scope.</dd>
+  <dt><code>actor_id</code></dt><dd>A query-time filter, not a primary scope. On the raw <code>infer=False</code> path it is derived from a message's <code>name</code> field and stored on the memory; for inferred memories the actor for storage is set later from message content.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Required identifier rule.</strong> Every scoped operation needs <strong>at least one</strong> of <code>user_id</code>/<code>agent_id</code>/<code>run_id</code>. <code>add</code> raises <code>Mem0ValidationError VALIDATION_001</code> if none are given; <code>search</code> and <code>get_all</code> raise <code>ValueError</code> if <code>filters</code> lacks all three. <code>delete_all</code> raises <code>ValueError</code> with the same requirement.</aside>
+<aside class="callout gotcha"><strong>Filters vs top-level kwargs.</strong> For <code>search</code> and <code>get_all</code> the identifiers <em>must</em> go inside <code>filters={...}</code>. Passing <code>user_id=</code> as a top-level kwarg is explicitly rejected by <code>_reject_top_level_entity_params</code> with a message pointing you to <code>filters</code>. (<code>add</code> is the exception — it takes them directly.)</aside>
+
+<h3>Identifier validation &amp; normalization</h3>
+<p><code>_validate_and_trim_entity_id</code> trims surrounding whitespace and rejects empty/whitespace-only values and any value containing <em>internal</em> whitespace (raising <code>ValueError</code>). This runs on <code>add</code>'s ids and on the <code>user_id/agent_id/run_id</code> entries inside <code>search</code>/<code>get_all</code> filters.</p>
+
+<pre><code class="language-python"># Correct usage
+m.add("I love hiking", user_id="alice")
+m.search("hobbies", filters={"user_id": "alice"})         # ids in filters
+m.get_all(filters={"agent_id": "support-bot"}, top_k=50)
+
+# Wrong — raises ValueError (entity params not allowed top-level)
+m.search("hobbies", user_id="alice")</code></pre>
+</section>
+
+<section id="metadata">
+<h2>Metadata handling</h2>
+<p>The engine maintains a strict separation between <em>internal</em> payload keys and <em>user</em> metadata.</p>
+<ul>
+  <li><strong>Stored on every memory automatically:</strong> <code>data</code> (the memory text), <code>hash</code> (md5 of text, used for dedup), <code>created_at</code>, <code>updated_at</code>, <code>text_lemmatized</code> (for BM25), plus whichever session ids apply, and optionally <code>actor_id</code>, <code>role</code>, <code>attributed_to</code>.</li>
+  <li><strong>User-supplied metadata</strong> passed to <code>add(metadata=...)</code> is deep-copied into the storage template and merged onto every created memory.</li>
+  <li><strong>Read-side shaping:</strong> <code>get</code>/<code>get_all</code>/<code>search</code> promote <code>user_id/agent_id/run_id/actor_id/role</code> to top-level fields, exclude the internal core keys (<code>data/hash/created_at/updated_at/id/text_lemmatized/attributed_to</code>), and place all remaining keys under a nested <code>metadata</code> dict in the result.</li>
+</ul>
+<aside class="callout insight"><strong>Insight</strong> <code>text_lemmatized</code> is computed once at write time and persisted in the payload, so keyword/BM25 search at query time reads a precomputed token field rather than re-lemmatizing every stored memory.</aside>
+<p>Results are normalized through the <code>MemoryItem</code> pydantic model (<code>mem0/configs/base.py</code>): <code>id</code>, <code>memory</code>, <code>hash</code>, <code>metadata</code>, <code>score</code>, <code>created_at</code>, <code>updated_at</code>. <code>get_all</code> drops <code>score</code> from its output (<code>model_dump(exclude={"score"})</code>) since list views have no relevance score.</p>
+</section>
+
+<section id="infer-false">
+<h2>The infer=False raw path</h2>
+<p>Setting <code>infer=False</code> on <code>add</code> bypasses the LLM entirely and stores each message as a verbatim memory.</p>
+<ul>
+  <li>Each non-system message is embedded directly and written via <code>_create_memory</code> as an <code>ADD</code>.</li>
+  <li><code>system</code> messages are skipped; malformed entries (missing <code>role</code> or <code>content</code>) are logged and skipped, not fatal.</li>
+  <li>The message's <code>role</code> is stored on the memory, and a <code>name</code> field, if present, becomes the <code>actor_id</code>.</li>
+  <li>Returned items include the extra <code>actor_id</code> and <code>role</code> keys (the inferred path returns only <code>id/memory/event</code>).</li>
+</ul>
+<pre><code class="language-python">m.add(
+    [{"role": "user", "content": "Order #42 shipped", "name": "agent-smith"}],
+    user_id="u1", infer=False,
+)
+# stores the literal text; no extraction, no dedup-via-LLM, no entity batch pipeline</code></pre>
+<aside class="callout gotcha"><strong>Gotcha</strong> The raw path does <em>not</em> run hash dedup, the existing-memory retrieval, or the Phase 7 batch entity linking that the inferred path does. It is a low-overhead "store exactly what I give you" mode — use it for logs or pre-extracted facts, not for conversational ingestion.</aside>
+</section>
+
+<section id="telemetry">
+<h2>Telemetry</h2>
+<p><code>mem0/memory/telemetry.py</code> sends anonymized usage events to PostHog through a thread-safe lazy singleton. It is engineered to never raise into the call path — every capture is wrapped in a broad try/except that only logs at debug level.</p>
+
+<h3>Opt-out &amp; sampling</h3>
+<dl>
+  <dt><code>MEM0_TELEMETRY</code></dt><dd>Master switch. Anything other than <code>true/1/yes</code> (case-insensitive) disables telemetry entirely; default is enabled.</dd>
+  <dt><code>MEM0_TELEMETRY_SAMPLE_RATE</code></dt><dd>Float in [0,1], default <code>0.1</code>. Hot-path events are sampled at this rate; out-of-range or unparsable values fall back to the default without raising.</dd>
+</dl>
+<aside class="callout security"><strong>Security/privacy</strong> Captured event data never includes raw identifiers. <code>process_telemetry_filters</code> (<code>mem0/memory/utils.py</code>) reports the <em>names</em> of filter keys present and md5-hashes the <code>user_id/agent_id/run_id</code> values into <code>encoded_ids</code>. To disable all of it set <code>MEM0_TELEMETRY=False</code>.</aside>
+
+<h3>Captured events</h3>
+<p>Each method fires a named event via <code>capture_event(name, self, extra)</code>: <code>mem0.init</code>, <code>mem0.add</code>, <code>mem0.search</code>, <code>mem0.get</code>, <code>mem0.get_all</code>, <code>mem0.update</code>, <code>mem0.delete</code>, <code>mem0.delete_all</code>, <code>mem0.history</code>, <code>mem0.reset</code>, and <code>mem0._create_procedural_memory</code>. Every event carries non-PII context: collection name, vector size, the fully-qualified class names of the vector store / LLM / embedding model, the API version, and <code>sync_type</code>.</p>
+<aside class="callout decision"><strong>Decision — lifecycle events bypass sampling.</strong> <code>mem0.init</code>, <code>mem0.reset</code>, <code>mem0._create_procedural_memory</code>, and <code>$identify</code> are in <code>_LIFECYCLE_EVENTS</code> and always fire at 100%; only hot-path events (add/search/get/...) are subject to the sample rate. Surviving sampled events are annotated with their <code>sample_rate</code> so dashboards can extrapolate true counts.</aside>
+<details><summary>Deep dive: the singleton &amp; graceful degradation</summary>
+<p><code>_get_oss_telemetry</code> builds a single <code>AnonymousTelemetry</code> instance with double-checked locking and registers an <code>atexit</code> shutdown so the background PostHog thread is closed once at interpreter exit. The PostHog client is constructed with a <code>before_send</code> sampling hook; if the installed posthog is older than 4.5.0 (no <code>before_send</code> support) it falls back to an unsampled client. A separate, unsampled <code>client_telemetry</code> singleton serves the hosted <a href="client-sdk.html">MemoryClient</a>.</p>
+</details>
+</section>
+
+<section id="setup">
+<h2>Setup: ~/.mem0 &amp; the anonymous user id</h2>
+<p><code>mem0/memory/setup.py</code> manages the per-machine config directory and the anonymous telemetry id; <code>setup_config()</code> is invoked at import time of <code>main.py</code>.</p>
+<ul>
+  <li><strong>Directory:</strong> <code>~/.mem0</code> (overridable via the <code>MEM0_DIR</code> env var), created on import. It holds <code>config.json</code> and, by default, <code>history.db</code>.</li>
+  <li><strong><code>setup_config()</code></strong> is idempotent: it ensures <code>config.json</code> has a top-level <code>user_id</code> (a uuid4), backfilling it for configs the CLI wrote with only a <code>telemetry.anonymous_id</code>. Without this, OSS telemetry would be silently dropped because there'd be no distinct id.</li>
+  <li><strong><code>get_or_create_user_id(vector_store)</code></strong> returns the anonymous id and, when a vector store is supplied, persists a marker record (a zero-ish vector with <code>type="user_identity"</code>) so the id is stable across the store.</li>
+</ul>
+<aside class="callout security"><strong>Privacy</strong> <code>mark_aliased</code> stores an <em>sha256 hash</em> of <code>anon_id\0email</code> rather than the email itself, so the local config never contains a plaintext platform email even when anon→email <code>$identify</code> aliasing has occurred.</aside>
+</section>
+
+<section id="errors-gotchas">
+<h2>Error model &amp; gotchas summary</h2>
+<table>
+  <thead><tr><th>Situation</th><th>Raised</th><th>Where</th></tr></thead>
+  <tbody>
+    <tr><td>No <code>user_id</code>/<code>agent_id</code>/<code>run_id</code> on <code>add</code></td><td><code>Mem0ValidationError</code> (VALIDATION_001)</td><td><code>_build_filters_and_metadata</code></td></tr>
+    <tr><td>Invalid <code>memory_type</code></td><td><code>Mem0ValidationError</code> (VALIDATION_002) / <code>ValueError</code> (async)</td><td><code>add</code></td></tr>
+    <tr><td><code>messages</code> not str/dict/list</td><td><code>Mem0ValidationError</code> (VALIDATION_003)</td><td><code>add</code></td></tr>
+    <tr><td>Entity id empty / whitespace-containing</td><td><code>ValueError</code></td><td><code>_validate_and_trim_entity_id</code></td></tr>
+    <tr><td>Entity id as top-level kwarg in <code>search</code>/<code>get_all</code></td><td><code>ValueError</code></td><td><code>_reject_top_level_entity_params</code></td></tr>
+    <tr><td><code>threshold</code> ∉ [0,1] or bad <code>top_k</code></td><td><code>ValueError</code></td><td><code>_validate_search_params</code></td></tr>
+    <tr><td><code>filters</code> missing all ids in <code>search</code>/<code>get_all</code></td><td><code>ValueError</code></td><td>method body</td></tr>
+    <tr><td><code>update</code>/<code>delete</code> on unknown id</td><td><code>ValueError</code></td><td><code>_update_memory</code>/<code>delete</code></td></tr>
+    <tr><td>Malformed config dict</td><td><code>pydantic.ValidationError</code></td><td><code>from_config</code></td></tr>
+  </tbody>
+</table>
+<aside class="callout gotcha"><strong>Async/sync error-type drift.</strong> The sync <code>add</code> raises <code>Mem0ValidationError VALIDATION_002</code> for a bad <code>memory_type</code>, but async <code>add</code> raises a plain <code>ValueError</code> for the same condition. Don't write <code>except Mem0ValidationError</code> and expect it to catch the async path.</aside>
+<aside class="callout gotcha"><strong>Silent empty returns.</strong> If the LLM extraction call fails or yields no facts, inferred <code>add</code> logs the error and returns <code>{"results": []}</code> — it does not raise. Callers must check the result list, not assume success implies a write.</aside>
+</section>
+
+<section id="example">
+<h2>End-to-end example</h2>
+<pre><code class="language-python">from mem0 import Memory, AsyncMemory
+
+m = Memory.from_config({"llm": {"provider": "openai", "config": {"model": "gpt-4o-mini"}}})
+
+res = m.add(
+    [{"role": "user", "content": "I'm vegetarian and allergic to peanuts"}],
+    user_id="alice",
+)
+mem_id = res["results"][0]["id"]
+
+m.search("what can alice eat", filters={"user_id": "alice"}, top_k=5, threshold=0.2)
+m.update(mem_id, "Vegetarian; allergic to peanuts and shellfish")
+m.history(mem_id)         # -> [ADD, UPDATE] rows from SQLite
+m.delete(mem_id)          # writes a DELETE row (is_deleted=1)
+
+# async mirror — identical surface, coroutines
+am = AsyncMemory()
+async def go():
+    await am.add("Likes jazz", user_id="alice")
+    return await am.get_all(filters={"user_id": "alice"})</code></pre>
+</section>
+
+<section id="exceptions-telemetry"><h2>Structured exceptions &amp; telemetry sampling</h2>
+<p>Two cross-cutting concerns wrap the engine: a typed exception hierarchy and sampled, opt-out usage telemetry.</p>
+
+<h3 id="structured-exceptions">Structured exceptions</h3>
+<p><code>mem0/exceptions.py</code> defines a rich hierarchy rooted at <code>MemoryError</code> &mdash; each carrying <code>message</code>, <code>error_code</code>, <code>details</code>, <code>suggestion</code> and <code>debug_info</code>. Subclasses cover the obvious failure modes: <code>AuthenticationError</code>, <code>RateLimitError</code>, <code>ValidationError</code>, <code>MemoryNotFoundError</code>, <code>NetworkError</code>, <code>ConfigurationError</code>, <code>MemoryQuotaExceededError</code>, <code>MemoryCorruptionError</code>, <code>VectorSearchError</code>, <code>CacheError</code>, plus OSS-specific <code>VectorStoreError</code> / <code>EmbeddingError</code> / <code>LLMError</code> / <code>DatabaseError</code> / <code>DependencyError</code>. A <code>HTTP_STATUS_TO_EXCEPTION</code> map and <code>create_exception_from_response()</code> turn raw HTTP responses into the right typed error (e.g. 429 &rarr; <code>RateLimitError</code> with a <code>retry_after</code> in <code>debug_info</code>).</p>
+<aside class="callout gotcha"><strong>Gotcha</strong> This module is largely <em>aspirational on the OSS path</em>. The self-hosted engine still surfaces generic provider exceptions rather than raising these typed ones; the hierarchy is most useful around the <a href="client-sdk.html">hosted client</a> and in your own wrappers. One <code>DependencyError</code> docstring even references <code>kuzu</code> as a graph_store &mdash; a leftover from the removed <a href="graph-memory.html">graph layer</a>.</aside>
+
+<h3 id="telemetry-sampling">Telemetry &amp; sampling</h3>
+<p>Anonymous usage telemetry (<code>mem0/memory/telemetry.py</code>) reports <em>event names and coarse, anonymized metadata &mdash; never memory content</em> to PostHog via an <code>AnonymousTelemetry</code> client. Opt out entirely with <code>MEM0_TELEMETRY=False</code>.</p>
+<dl>
+<dt>Hot-path sampling</dt><dd>High-frequency events are sampled at <code>_DEFAULT_SAMPLE_RATE = 0.1</code> (10%). Override with <code>MEM0_TELEMETRY_SAMPLE_RATE</code> (parsed defensively, clamped to <code>[0.0, 1.0]</code>, never raises).</dd>
+<dt>Lifecycle events always fire</dt><dd>Init/lifecycle events and PostHog&rsquo;s <code>$identify</code> bypass sampling and fire at 100% &mdash; so person-merging is never lost to sampling.</dd>
+<dt>Extrapolation</dt><dd>A PostHog <code>before_send</code> hook drops sampled events and annotates survivors with a <code>sample_rate</code> property, so dashboards can recover true counts via <code>1 / sample_rate</code>.</dd>
+</dl>
+<aside class="callout perf"><strong>Performance</strong> Sampling the hot path keeps telemetry overhead negligible at scale while preserving exact lifecycle/identity counts &mdash; a deliberate accuracy-vs-volume trade. The condition is <code>random.random() &gt;= rate</code>, so <code>rate=0</code> drops everything and <code>rate=1</code> keeps everything.</aside>
+</section>

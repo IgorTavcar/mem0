@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Surveys mem0&#x27;s first-party clients and editor plugins: the Python (mem0-cli) and Node (@mem0/cli) CLIs with their Agent Mode &lt;5s key bootstrap and AGENTRUSH game; the mem0-plugin that wires Claude Code/Cursor/Codex/OpenCode/Antigravity to the remote MCP server (mcp.mem0.ai) with lifecycle hooks for automatic capture and nine MCP tools; the @mem0/openclaw-mem0 plugin with token-budgeted recall, pre-extraction filtering, per-agent isolation, and the cost-gated dream consolidation; the @mem0/vercel-ai-provider for AI SDK v5; and the reference vs pipeline skills. Each integration&#x27;s package, install, and connection path (REST, MCP, or embedded mem0ai SDK) is documented against the source.">
+<meta name="generator" content="mem0-wiki-build">
+<title>Integrations &amp; Ecosystem · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Integrations & Ecosystem", "description": "Surveys mem0's first-party clients and editor plugins: the Python (mem0-cli) and Node (@mem0/cli) CLIs with their Agent Mode <5s key bootstrap and AGENTRUSH game; the mem0-plugin that wires Claude Code/Cursor/Codex/OpenCode/Antigravity to the remote MCP server (mcp.mem0.ai) with lifecycle hooks for automatic capture and nine MCP tools; the @mem0/openclaw-mem0 plugin with token-budgeted recall, pre-extraction filtering, per-agent isolation, and the cost-gated dream consolidation; the @mem0/vercel-ai-provider for AI SDK v5; and the reference vs pipeline skills. Each integration's package, install, and connection path (REST, MCP, or embedded mem0ai SDK) is documented against the source.", "keywords": "mem0 cli, mem0-cli, @mem0/cli, mem0 init --agent, agent mode, agent-rush, mem0 whoami, mem0 identify, mem0-plugin, MCP server, mcp.mem0.ai, add_memory", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html" class="active">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Ecosystem</span><span class="sep">/</span><span>Integrations &amp; Ecosystem</span></nav>
+    <h1>Integrations &amp; Ecosystem</h1>
+<p class="lead">mem0 ships a fleet of first-party clients and editor plugins that all route through the same memory layer. Two command-line tools (<code>mem0-cli</code> Python and <code>@mem0/cli</code> Node) provide terminal access and an unattended <em>Agent Mode</em> signup that mints an API key in under five seconds; the <code>mem0-plugin</code> wires Claude Code / Cursor / Codex / OpenCode / Antigravity to the hosted MCP server with lifecycle hooks for automatic capture; <code>@mem0/openclaw-mem0</code> adds skills-based recall, filtering, isolation and dream consolidation to OpenClaw agents; <code>@mem0/vercel-ai-provider</code> wraps the Vercel AI SDK; and a set of <a href="#skills">reference and pipeline skills</a> teach assistants how to write correct mem0 code. This page surveys each surface, its package, and exactly how it connects to mem0.</p>
+
+<section id="overview">
+<h2>The ecosystem at a glance</h2>
+<p>Every integration is a thin client over either the hosted <a href="client-sdk.html">MemoryClient / Platform API</a> (<code>api.mem0.ai</code>), the remote MCP endpoint (<code>mcp.mem0.ai</code>), or the OSS <a href="memory-engine.html">Memory engine</a>. They share the same scoping vocabulary (<code>user_id</code> / <code>agent_id</code> / <code>app_id</code> / <code>run_id</code>) defined in <a href="config-system.html">the config system</a>.</p>
+
+<table>
+<thead><tr><th>Integration</th><th>Package</th><th>Connects via</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td>Python CLI</td><td><code>mem0-cli</code> (PyPI)</td><td>Platform REST (<code>PlatformBackend</code> → <code>api.mem0.ai</code>)</td><td>Terminal CRUD over memories; Agent Mode bootstrap; AGENTRUSH</td></tr>
+<tr><td>Node CLI</td><td><code>@mem0/cli</code> (npm)</td><td>Platform REST</td><td>Feature-parity TypeScript port of the Python CLI</td></tr>
+<tr><td>Editor plugin</td><td><code>mem0-plugin</code> (marketplace)</td><td>Remote MCP (<code>mcp.mem0.ai/mcp/</code>) + lifecycle hooks</td><td>Persistent memory for Claude Code / Cowork / Cursor / Codex / OpenCode / Antigravity</td></tr>
+<tr><td>OpenClaw plugin</td><td><code>@mem0/openclaw-mem0</code> (npm)</td><td><code>mem0ai</code> SDK — Platform or OSS Memory</td><td>Skills-mode recall / triage / dream for OpenClaw agents</td></tr>
+<tr><td>Vercel AI provider</td><td><code>@mem0/vercel-ai-provider</code> (npm)</td><td>Platform REST (<code>v2/memories</code>) wrapping <code>@ai-sdk/*</code></td><td>Memory-augmented <code>generateText</code>/<code>streamText</code> for AI SDK v5</td></tr>
+<tr><td>Reference skills</td><td><code>skills/mem0</code>, <code>mem0-cli</code>, <code>mem0-vercel-ai-sdk</code></td><td>(loaded into assistant context)</td><td>Always-on SDK knowledge so assistants write correct code</td></tr>
+<tr><td>Pipeline skills</td><td><code>skills/mem0-integrate</code>, <code>mem0-test-integration</code></td><td>(executed on demand)</td><td>TDD workflow that wires mem0 into an existing repo and verifies it</td></tr>
+</tbody>
+</table>
+
+<aside class="callout insight"><strong>Insight — one bootstrap, every surface</strong> The recurring marketing line "mints an evaluation API key in &lt;5 seconds — no email, no OTP, no browser" appears verbatim in the <code>mem0-plugin</code> and <code>openclaw</code> READMEs, but the machinery lives in <em>one place</em>: <code>mem0 init --agent</code>. The plugins simply tell the agent to shell out to the CLI. See <a href="#agent-mode">Agent Mode</a>.</aside>
+</section>
+
+<section id="python-cli">
+<h2>Python CLI — <code>mem0-cli</code></h2>
+<p>A <a href="https://typer.tiangolo.com/">Typer</a> app (<code>cli/python/src/mem0_cli/app.py</code>, entrypoint <code>mem0_cli.app:main</code>) that talks to the hosted Platform over HTTPS. Install via <code>pipx install mem0-cli</code> (recommended) or <code>pip install mem0-cli</code>; requires Python 3.10+.</p>
+
+<h3>Command surface</h3>
+<dl>
+<dt>Memory panel</dt><dd><code>add</code>, <code>search</code>, <code>get</code>, <code>list</code>, <code>update</code>, <code>delete</code> — all accept the four scope flags (<code>-u/--user-id</code>, <code>--agent-id</code>, <code>--app-id</code>, <code>--run-id</code>) and read text from an argument, <code>--file</code>, <code>--messages</code> JSON, or piped stdin.</dd>
+<dt>Management</dt><dd><code>init</code>, <code>status</code>, <code>import</code>, <code>help</code>, plus <code>config</code> (show/get/set), <code>entity</code> (list/delete), and <code>event</code> (list/status) sub-apps.</dd>
+<dt>Setup / game</dt><dd><code>identify</code>, <code>whoami</code>, and the <code>agent-rush</code> sub-app (<code>add</code>/<code>search</code>).</dd>
+</dl>
+
+<h4>Implementation highlights</h4>
+<ul>
+<li><strong>Lazy command imports.</strong> Every <code>app.command</code> body imports its handler from <code>mem0_cli.commands.*</code> at call time, keeping <code>--help</code> and tab completion fast.</li>
+<li><strong>Upfront key validation.</strong> <code>_get_backend_and_config()</code> calls <code>backend.ping(timeout=5.0)</code> against <code>/v1/ping/</code>; a 401/403 (<code>AuthError</code>) aborts, while network blips print a warning and proceed. The resolved <code>user_email</code> is cached for telemetry and written back to config.</li>
+<li><strong>Scope resolution.</strong> <code>_resolve_ids()</code> uses CLI flag &gt; config default; crucially, <em>any</em> explicit ID switches off all config defaults so you don't accidentally over-filter (see the docstring in <code>app.py</code>).</li>
+<li><strong>Agent mode output.</strong> The global <code>--agent</code> / <code>--json</code> flag (parsed in <code>main()</code> before Typer, so it works positionally) sets agent mode, suppresses spinners/colours, and wraps results in a JSON envelope; errors become <code>{"status":"error", ...}</code> with a non-zero exit. <code>mem0 help --json</code> emits the full command tree from <code>_build_help_json()</code> for self-discovering agents.</li>
+</ul>
+
+<aside class="callout gotcha"><strong>Gotcha — <code>--agent</code> means two different things</strong> As a <em>global</em> flag it toggles JSON-envelope output. But <code>mem0 init --agent</code> is a <em>subcommand flag</em> that bootstraps an Agent Mode account. <code>main()</code> special-cases this: when <code>init</code> is in argv it leaves <code>--agent</code> in place (for <code>init_cmd</code>) and only strips <code>--json</code> as the output toggle.</aside>
+
+<aside class="callout gotcha"><strong>Gotcha — the <code>[oss]</code> extra is declared but unwired</strong> <code>cli/python/pyproject.toml</code> declares <code>oss = ["mem0ai&gt;=0.1.0"]</code>, and the README/help advertise <code>--graph</code> flags and an OSS path. But the current backend factory <code>get_backend()</code> in <code>backend/base.py</code> unconditionally returns <code>PlatformBackend</code> — there is no <code>OssBackend</code> in <code>cli/python/src/mem0_cli/backend/</code> (only <code>base.py</code> and <code>platform.py</code>). The <code>--graph</code>/<code>--no-graph</code> flags appear only in the static <code>_build_help_json()</code> dict, not on the live <code>add</code>/<code>search</code> commands. Treat OSS-mode-in-CLI and graph as reserved/not-yet-implemented in this revision.</aside>
+</section>
+
+<section id="agent-mode">
+<h2>Agent Mode &amp; the &lt;5-second key</h2>
+<p><code>mem0 init --agent --agent-caller &lt;name&gt;</code> bootstraps an unattended evaluation account with no email, OTP or browser — the headline UX for autonomous agents. The logic lives in <code>commands/init_cmd.py</code> (dispatch) and <code>commands/agent_mode_cmd.py</code> (HTTP).</p>
+
+<h3>Dispatch rules (run before the overwrite guard)</h3>
+<ol>
+<li><strong>Reuse env key.</strong> If <code>MEM0_API_KEY</code> is set and pings OK (<code>_ping_key</code>, which only treats 401/403 as invalid), reuse it — no new key minted.</li>
+<li><strong>Reuse config key.</strong> Else if <code>~/.mem0/config.json</code> holds a valid key, reuse it.</li>
+<li><strong>Mint a shadow.</strong> Else <code>bootstrap_via_backend()</code> POSTs to <code>/api/v1/auth/agent_mode/</code> and persists <code>api_key</code>, <code>default_user_id</code> (a <code>user_&lt;slug&gt;</code> the backend returns), <code>agent_mode=true</code>, <code>created_via="agent_mode"</code>.</li>
+</ol>
+<p>An agent context is detected by <code>--agent</code>, the global JSON flag, or an env var sniffed by <code>agent_detect.detect_agent_caller()</code> (recognises <code>CLAUDECODE</code>, <code>CURSOR_AGENT</code>, <code>CODEX_CLI</code>, <code>CLINE</code>, <code>CONTINUE</code>, <code>AIDER_SESSION</code>, <code>GOOSE_AGENT</code>, <code>WINDSURF_AGENT</code>, …).</p>
+
+<aside class="callout decision"><strong>Decision — env vars trigger, but never name the agent</strong> <code>agent_detect.py</code> is explicit: env-var detection is a <em>context trigger only</em>. The canonical agent identity is self-declared via <code>--agent-caller</code> (Proof-Editor style) or backfilled later with <code>mem0 identify &lt;name&gt;</code>. The detector list is "curated, not exhaustive" — honest reporting depends on the flag, not sniffing.</aside>
+
+<h3>Claiming &amp; identity</h3>
+<dl>
+<dt><code>mem0 init --email &lt;addr&gt;</code> (on an agent-mode config)</dt><dd>Runs <code>claim_via_otp()</code>: reuses the email-code flow but adds <code>agent_mode_api_key</code> to the verify body so the backend upgrades the key in place. The API key value never changes; memories transfer; <code>agent_mode</code> flips to <code>false</code> and <code>claimed_at</code> is stamped.</dd>
+<dt><code>mem0 whoami</code></dt><dd>Prints <code>platform.default_user_id</code> — the AGENTRUSH identifier (<code>whoami_cmd.run_whoami</code>).</dd>
+<dt><code>mem0 identify &lt;name&gt;</code></dt><dd>Idempotent PATCH to <code>/api/v1/auth/agent_mode/caller/</code> tagging the active key with the agent name.</dd>
+<dt><code>mem0 agent-rush add|search</code></dt><dd>A public memory game wrapping <code>/v1/agent-rush/memories/</code>. <code>agent_rush_cmd.py</code> enforces a one-time PII warning, surfaces typed error codes (e.g. <code>agentrush_search_first</code>, lifetime quotas), and marks requests with header <code>X-Mem0-Mode: agent-rush</code>.</dd>
+</dl>
+
+<aside class="callout security"><strong>Security — AGENTRUSH memories are PUBLIC</strong> <code>_PII_WARNING_LINES</code> blocks the first interactive add until the user types <code>y</code> (persisted as <code>agent_rush.acknowledged_at</code>). For non-TTY agent runs the warning is printed to stderr and the add proceeds — agents can't answer a y/N prompt.</aside>
+
+<h3>Plugin sync</h3>
+<p><code>plugin_sync.sync_api_key()</code> propagates a freshly minted key into <em>existing</em> touchpoints only: the <code>env.MEM0_API_KEY</code> entry in <code>~/.claude/settings.json</code> and any <code>export MEM0_API_KEY=</code> line in <code>~/.zshrc</code>/<code>~/.bashrc</code>/<code>~/.bash_profile</code>. Writes are atomic (tmp + rename) and never <em>create</em> new entries — it solves the "config.json updated but the MCP server still reads the stale env key" surprise without clobbering unrelated config.</p>
+</section>
+
+<section id="node-cli">
+<h2>Node CLI — <code>@mem0/cli</code></h2>
+<p>A <a href="https://github.com/tj/commander.js">Commander</a>-based port (<code>cli/node/src/index.ts</code>, bin <code>mem0</code>, Node ≥18). It is a near line-for-line mirror of the Python CLI and shares the same version number (<code>0.2.7</code> at time of writing).</p>
+<ul>
+<li><strong>Full command parity:</strong> <code>cli/node/src/commands/</code> contains <code>init</code>, <code>memory</code>, <code>config</code>, <code>entities</code>, <code>events</code>, <code>identify</code>, <code>whoami</code>, <code>agent-rush</code>, <code>agent-mode</code>, and <code>utils</code> — i.e. Agent Mode bootstrap (<code>bootstrapViaBackend</code>), OTP claim (<code>claimViaOtp</code>), and env-based agent detection (<code>detectAgentCaller</code>) all exist on the Node side too.</li>
+<li><strong>Same backend abstraction:</strong> <code>backend/index.ts → getBackend()</code> returns <code>PlatformBackend</code>; the 5-second ping validation is implemented with <code>Promise.race</code> against a timeout.</li>
+<li><strong>Dependencies:</strong> <code>commander</code>, <code>chalk</code>, <code>cli-table3</code>, <code>ora</code> (spinners), <code>boxen</code>; built with <code>tsup</code>, linted with Biome.</li>
+</ul>
+<p>Both CLIs publish identical READMEs and the <a href="#skills"><code>mem0-cli</code> skill</a> covers them jointly. See <a href="typescript-sdk.html">the TypeScript SDK</a> for the underlying client.</p>
+</section>
+
+<section id="mem0-plugin">
+<h2>mem0-plugin — MCP server + lifecycle hooks</h2>
+<p>The <code>mem0-plugin/</code> directory is a multi-editor plugin (Claude Code, Claude Cowork, Cursor, Codex, OpenCode, Antigravity). Its core is the <strong>remote MCP server</strong> at <code>https://mcp.mem0.ai/mcp/</code> — no local Python/Node runtime is required for memory operations. Manifests: <code>plugin.json</code>, <code>.claude-plugin/plugin.json</code> (v0.2.8), <code>.codex-plugin/</code>, <code>.cursor-plugin/</code>, <code>.opencode-plugin/</code>.</p>
+
+<h3>MCP wiring</h3>
+<p>Every editor variant points at the same endpoint with a bearer/token header interpolated from the environment at session start (not install time), so a restart re-reads the key automatically:</p>
+<pre><code class="language-json">// mem0-plugin/.mcp.json (Claude Code)
+{ "mcpServers": { "mem0": {
+    "type": "http",
+    "url": "https://mcp.mem0.ai/mcp/",
+    "headers": { "Authorization": "Token ${MEM0_API_KEY}" } } } }</code></pre>
+<p>Codex uses TOML with <code>bearer_token_env_var = "MEM0_API_KEY"</code> (<code>.codex-mcp.json</code> → <code>config.toml</code>); Cursor uses <code>.cursor-mcp.json</code> / a deeplink; <code>mcp_config.json</code> uses the <code>serverUrl</code> shape for Antigravity.</p>
+
+<h3>MCP tools</h3>
+<p>Nine tools are exposed once the server connects (from <code>mem0-plugin/README.md</code>):</p>
+<dl>
+<dt><code>add_memory</code></dt><dd>Save text or conversation history for a user/agent.</dd>
+<dt><code>search_memories</code></dt><dd>Semantic search across memories with filters.</dd>
+<dt><code>get_memories</code></dt><dd>List memories with filters and pagination.</dd>
+<dt><code>get_memory</code></dt><dd>Retrieve a specific memory by ID.</dd>
+<dt><code>update_memory</code></dt><dd>Overwrite a memory's text by ID.</dd>
+<dt><code>delete_memory</code></dt><dd>Delete a single memory by ID.</dd>
+<dt><code>delete_all_memories</code></dt><dd>Bulk delete all memories in scope.</dd>
+<dt><code>delete_entities</code></dt><dd>Delete a user/agent/app/run entity and its memories.</dd>
+<dt><code>list_entities</code></dt><dd>List users/agents/apps/runs stored in mem0.</dd>
+</dl>
+
+<h3>Lifecycle hooks (automatic capture)</h3>
+<p><code>hooks.json</code> registers shell scripts on five editor events. The variants <code>hooks/cursor-hooks.json</code> and <code>hooks/codex-hooks.json</code> mirror it; Codex hooks are opt-in via <code>scripts/install_codex_hooks.py</code> (Codex doesn't auto-wire plugin hooks).</p>
+<table>
+<thead><tr><th>Event</th><th>Matcher</th><th>Script</th><th>Effect</th></tr></thead>
+<tbody>
+<tr><td><code>SessionStart</code></td><td><code>*</code></td><td><code>ensure_deps.sh</code>, <code>on_session_start.sh</code></td><td>Install SDK deps; emit the "Mem0 Active" status banner with live memory count; kick off background <code>auto_import.py</code> and <code>auto_setup_categories.py</code></td></tr>
+<tr><td><code>UserPromptSubmit</code></td><td>—</td><td><code>on_user_prompt.sh</code> → <code>auto_capture.py</code></td><td>Inject relevant memories; every 3rd message capture recent exchanges (8 s timeout)</td></tr>
+<tr><td><code>PreToolUse</code></td><td><code>Write|Edit|MultiEdit</code></td><td><code>block_memory_write.sh</code></td><td>Block the agent from writing to native memory files (use mem0 instead)</td></tr>
+<tr><td><code>PreToolUse</code></td><td><code>mcp__mem0__.*</code></td><td><code>enforce_metadata_defaults.sh</code></td><td>Inject default <code>user_id</code>/<code>app_id</code> metadata into MCP calls</td></tr>
+<tr><td><code>PostToolUse</code></td><td><code>mcp__mem0__.*</code></td><td><code>on_post_tool_use.sh</code></td><td>Record per-tool session stats &amp; fire telemetry</td></tr>
+<tr><td><code>PostToolUse</code></td><td><code>Bash</code></td><td><code>on_bash_output.sh</code></td><td>Mine bash output for facts worth remembering</td></tr>
+</tbody>
+</table>
+
+<aside class="callout perf"><strong>Perf — hooks never block</strong> Every hook command ends with <code>2>/dev/null || true</code> and the scripts <code>exit 0</code> unconditionally with tight timeouts (3–8 s). <code>auto_capture.py</code> reads only the transcript <em>tail</em> (200 lines, capped at 8000 chars) and posts with <code>infer=True</code> so the platform extracts facts asynchronously — a slow or failing capture can never stall the editor.</aside>
+
+<h3>Coding-tuned categories</h3>
+<p><code>scripts/setup_coding_categories.py</code> replaces the default consumer taxonomy with 17 development categories (<code>architecture_decisions</code>, <code>bug_fixes</code>, <code>coding_conventions</code>, <code>security_constraints</code>, …) via <code>project.update(custom_categories=[...])</code>. It runs idempotently in the background on session start, cached in <code>~/.mem0/categories_setup.json</code>, and requires the <code>mem0ai</code> Python SDK plus <code>MEM0_API_KEY</code>.</p>
+
+<h3>Plugin skills (slash commands)</h3>
+<p>16 skill directories under <code>mem0-plugin/skills/</code> surface as <code>/mem0:</code> commands: <code>remember</code>, <code>tour</code>, <code>peek</code>, <code>stats</code>, <code>dream</code>, <code>pin</code>, <code>forget</code>, <code>health</code>, <code>export</code>, <code>import</code>, <code>list-projects</code>, <code>switch-project</code>, <code>memory-reviewer</code>, <code>context-loader</code>, <code>onboard</code>, and the SDK-reference <code>mem0</code> skill. <code>/mem0:onboard</code> is the idempotent setup wizard run after install. (The README's "17 skills" count includes the auto-prompted <code>memory-reviewer</code>/<code>context-loader</code> pair counted twice across tables — the directory count is 16.)</p>
+
+<aside class="callout gotcha"><strong>Gotcha — restart to reconnect after an update</strong> The MCP config interpolates <code>${MEM0_API_KEY}</code> at session start, so updating the plugin leaves the running session holding a stale server handle. The README instructs a client restart (<code>/restart</code> in Claude Code) — the key is re-read, not re-entered.</aside>
+</section>
+
+<section id="openclaw">
+<h2>OpenClaw — <code>@mem0/openclaw-mem0</code></h2>
+<p>A native OpenClaw memory-slot plugin (<code>openclaw/</code>, npm <code>@mem0/openclaw-mem0</code> v1.0.11) built directly on the <code>mem0ai@3.0.3</code> package. Unlike the MCP plugin it embeds the SDK, so it supports both <strong>platform</strong> mode (cloud) and a fully self-hosted <strong>open-source</strong> mode (local SQLite vector store at <code>~/.mem0/vector_store.db</code>, OpenAI/Ollama/Anthropic LLMs, Qdrant/PGVector). It loads through an exclusive slot — install alone does nothing until <code>plugins.slots.memory: "openclaw-mem0"</code> is set in <code>openclaw.json</code>.</p>
+
+<p>The entrypoint <code>index.ts</code> uses <code>definePluginEntry({ id: "openclaw-mem0", ... })</code>, reads auth from <code>openclaw.json</code> via <code>readPluginAuth()</code>, parses config with <code>mem0ConfigSchema</code>, builds a provider (<code>createProvider</code> → platform or OSS), and registers eight agent tools through <code>registerAllTools()</code>: <code>memory_search</code>, <code>memory_add</code>, <code>memory_get</code>, <code>memory_list</code>, <code>memory_update</code>, <code>memory_delete</code>, <code>memory_event_list</code>, <code>memory_event_status</code> (the last two are platform-only).</p>
+
+<h3>Recall — token-budgeted, category-ranked</h3>
+<p><code>recall.ts</code> replaces a naive "dump all results" with a four-stage pipeline:</p>
+<ol>
+<li><strong>Search</strong> long-term memories (over-fetch <code>maxMemories * 2</code>) plus an optional session-scoped search by <code>run_id</code>, deduplicated by ID.</li>
+<li><strong>Rank</strong> by a fixed category priority (<code>identity</code> &gt; <code>configuration</code> &gt; <code>rule</code> &gt; <code>preference</code> &gt; <code>decision</code> &gt; …), then by importance, then by relevance score.</li>
+<li><strong>Budget</strong> to a token cap (default 1500, ~4 chars/token) and a max count (15); identity/configuration memories bypass the budget when <code>identityAlwaysInclude</code> is on.</li>
+<li><strong>Format</strong> grouped by category into a <code>&lt;recalled-memories&gt;</code> block for context injection.</li>
+</ol>
+<p><code>sanitizeQuery()</code> strips OpenClaw's "Sender (untrusted metadata)" JSON prefix before searching but deliberately does <em>not</em> rewrite the query — query formulation is the agent's job under the skill protocol. Recall is wrapped in try/catch so a search failure degrades gracefully and never blocks the turn.</p>
+
+<h3>Filtering — pre-extraction noise removal</h3>
+<p><code>filtering.ts</code> cleans messages before they reach extraction so junk never becomes a memory:</p>
+<ul>
+<li><code>NOISE_MESSAGE_PATTERNS</code> drops whole messages (heartbeats, timestamps, JSON-only tool results, one-word acks like "ok"/"thanks", single emoji).</li>
+<li><code>SESSION_SPECIFIC_PATTERNS</code> rejects "in this session"-style capability chatter (e.g. discussions of which tools are exposed) that would be misleading if stored.</li>
+<li><code>NOISE_CONTENT_PATTERNS</code> strips embedded metadata/JSON blocks from otherwise-valid messages.</li>
+<li>Surviving messages are truncated to <code>MAX_MESSAGE_LENGTH</code> (2000 chars) with a <code>[...truncated]</code> marker, then deduplicated. The pipeline is exported as <code>filterMessagesForExtraction()</code>.</li>
+</ul>
+
+<h3>Isolation — per-agent namespaces</h3>
+<p><code>isolation.ts</code> gives every agent its own memory namespace via session-key routing, with zero breaking changes for single-agent setups:</p>
+<ul>
+<li><code>extractAgentId()</code> parses OpenClaw keys (<code>agent:main:main</code>, <code>agent:&lt;id&gt;:&lt;session&gt;</code>, <code>agent:main:subagent:&lt;uuid&gt;</code>); <code>main</code> returns <code>undefined</code> (use the configured <code>userId</code>).</li>
+<li><code>effectiveUserId(base, key)</code> maps a named agent to <code>&lt;base&gt;:agent:&lt;id&gt;</code>; <code>resolveUserId()</code> applies priority <em>explicit agentId &gt; explicit userId &gt; session-derived &gt; configured</em>.</li>
+<li><code>isNonInteractiveTrigger()</code> skips cron/heartbeat/automation sessions (by trigger or <code>:cron:</code>/<code>:heartbeat:</code> key pattern) so system jobs don't pollute the store; <code>isSubagentSession()</code> flags ephemeral subagent UUIDs whose namespaces are always empty on recall.</li>
+</ul>
+
+<h3>Dream-gate — guarded auto-consolidation</h3>
+<p><code>dream-gate.ts</code> decides <em>when</em> the periodic "dream" consolidation runs (merge duplicates, resolve conflicts, prune stale entries). It is a cost-aware, lock-protected gate persisted to <code>dream-state.json</code> in the plugin state dir:</p>
+<dl>
+<dt>Cheap gates first</dt><dd><code>checkCheapGates()</code> reads only local files: at least 24 h since last run (<code>minHours</code>) <em>and</em> at least 5 interactive sessions (<code>minSessions</code>). Session counts are deduped by <code>sessionId</code> via <code>incrementSessionCount()</code>.</dd>
+<dt>Expensive gate last</dt><dd>Only if the cheap gates pass does <code>checkMemoryGate()</code> require ≥20 stored memories — avoiding an API call on most turns.</dd>
+<dt>Lock</dt><dd><code>acquireDreamLock()</code> writes <code>dream.lock</code> with the exclusive <code>wx</code> flag so racing processes can't double-run; locks older than 1 h are reclaimed. <code>recordDreamCompletion()</code> resets the session counter.</dd>
+</dl>
+<aside class="callout perf"><strong>Perf — gate ordering is the whole point</strong> The dream-gate deliberately orders checks cheapest-first (two local file reads) before the one network round-trip for the memory count. On a typical turn the gate short-circuits with zero API calls, so consolidation overhead is amortised to roughly once per day per user.</aside>
+
+<h3>Skills mode</h3>
+<p>Default after <code>openclaw mem0 init</code>. <code>skill-loader.ts</code> loads two SKILL prompts shipped in <code>openclaw/skills/</code> — <code>memory-triage</code> (structured fact extraction with importance gates and a domain overlay, default <code>companion</code>) and <code>memory-dream</code> (consolidation). It injects user config (categories, <code>importanceThreshold</code>, credential patterns, custom rules) into the triage prompt. In code, <code>autoRecall</code> and <code>autoCapture</code> both default to <code>true</code> (only disabled when explicitly set <code>false</code> in <code>config.ts</code>) and run alongside skills mode; the built-in OpenClaw <code>session-memory</code> hook is disabled to avoid conflicts.</p>
+<p>The plugin shares the <code>openclaw mem0</code> CLI namespace (init / add / search / list / get / update / delete / status / config / event / dream), with an interactive 4-step OSS wizard (<code>cli/oss-wizard.ts</code>) and full <code>--json</code> output for agents.</p>
+</section>
+
+<section id="vercel-ai-sdk">
+<h2>Vercel AI provider — <code>@mem0/vercel-ai-provider</code></h2>
+<p>A memory provider for the <a href="https://sdk.vercel.ai/">Vercel AI SDK v5</a> (<code>vercel-ai-sdk/</code>, npm v2.0.5). It wraps the underlying LLM provider so that <code>generateText</code>/<code>streamText</code> automatically retrieve relevant memories and (optionally) store new ones — turning a stateless model call into a memory-augmented one.</p>
+
+<h3>Two ways to use it</h3>
+<pre><code class="language-typescript">import { createMem0 } from "@mem0/vercel-ai-provider";
+const mem0 = createMem0({ provider: "openai", mem0ApiKey: "m0-...", apiKey: "..." });
+
+// Drop-in model wrapper — memory woven in transparently
+const { text } = await generateText({
+  model: mem0("gpt-4-turbo", { user_id: "borat" }),
+  prompt: "Suggest me a good car to buy!",
+});</code></pre>
+<p>The provider implements the AI SDK's <code>ProviderV2</code> interface (<code>src/mem0-provider.ts</code>); <code>createMem0()</code> returns a callable that builds a <code>Mem0GenericLanguageModel</code> (<code>LanguageModelV2</code>). Internally <code>Mem0ClassSelector</code> (<code>mem0-provider-selector.ts</code>) dispatches to one of <code>["openai", "anthropic", "cohere", "groq", "google"]</code> via the matching <code>@ai-sdk/*</code> package — so memory works across all five model families. Streaming uses the provider's native <code>doStream</code> (no buffering middleware).</p>
+
+<h3>Standalone memory utilities</h3>
+<p>For use with a plain <code>@ai-sdk/openai</code> model (no wrapper), <code>src/mem0-utils.ts</code> exports four helpers (re-exported from <code>src/index.ts</code>):</p>
+<dl>
+<dt><code>addMemories(messages, config)</code></dt><dd>Converts an AI SDK prompt to mem0 format (<code>convertToMem0Format</code>, handling text/image/pdf/mdx parts) and POSTs to the platform.</dd>
+<dt><code>retrieveMemories(prompt, config)</code></dt><dd>Returns memories formatted as a system-prompt string to inject.</dd>
+<dt><code>getMemories(prompt, config)</code></dt><dd>Returns the raw memory array for custom processing.</dd>
+<dt><code>searchMemories(prompt, config)</code></dt><dd>Thin search wrapper.</dd>
+</dl>
+<p>Search builds an <code>OR</code> filter over <code>user_id</code>/<code>app_id</code>/<code>agent_id</code>/<code>run_id</code> and hits <code>POST /v2/memories/search/</code> with <code>version: "v2"</code>, <code>output_format: "v1.1"</code>, plus org/project filters. The API key is resolved by <code>loadApiKey</code> from <code>config.mem0ApiKey</code> or <code>MEM0_API_KEY</code>.</p>
+
+<aside class="callout decision"><strong>Decision — community provider, hosted-only</strong> The README labels this a "community-maintained" library (author Saket Aryan), pinned to AI SDK v5 (<code>ai@5.0.2</code>). It talks exclusively to <code>api.mem0.ai</code> (or a <code>host</code> override) — there is no OSS-engine path here, unlike the OpenClaw plugin.</aside>
+</section>
+
+<section id="skills">
+<h2>Skills — reference vs pipeline</h2>
+<p>The <code>skills/</code> directory ships skill definitions conforming to the <a href="https://github.com/anthropic-experimental/skills">skills standard</a>. They split into two categories (per <code>skills/README.md</code>).</p>
+
+<h3>Reference skills — always on</h3>
+<p>Loaded into assistant context so it writes correct mem0 code. Each has a precise <code>TRIGGER</code>/<code>DO NOT TRIGGER</code> block in its <code>SKILL.md</code> to route ambiguous queries:</p>
+<dl>
+<dt><code>mem0</code></dt><dd>The default skill — Python + TypeScript SDKs (Platform + OSS <code>Memory</code> class) and framework integrations (LangChain, CrewAI, OpenAI Agents SDK, LlamaIndex, AutoGen, LangGraph). Has <code>references/</code> docs and a <code>scripts/mem0_doc_search.py</code>.</dd>
+<dt><code>mem0-cli</code></dt><dd>Terminal workflows for both the Node and Python CLIs; triggers on flags like <code>--user-id</code>, <code>--json</code>, <code>--agent</code>.</dd>
+<dt><code>mem0-vercel-ai-sdk</code></dt><dd><code>@mem0/vercel-ai-provider</code> / <code>createMem0</code> usage; covers <code>retrieveMemories</code>, <code>addMemories</code>, <code>getMemories</code>, <code>searchMemories</code>.</dd>
+</dl>
+
+<h3>Pipeline skills — run on demand</h3>
+<p>Invoked as slash commands; these <em>do real work</em> (branches, tests, code) and are designed to run in sequence on the same workspace:</p>
+<dl>
+<dt><code>/mem0-integrate</code></dt><dd>Detects the repo language, asks Platform vs OSS, writes failing tests first (TDD), then implements — producing a <code>mem0-integrate/&lt;slug&gt;</code> branch and <code>.mem0-integration/</code> artifacts.</dd>
+<dt><code>/mem0-test-integration</code></dt><dd>Loosely coupled verifier: installs deps, runs the repo's native suite, then a real end-to-end smoke test against the user's API key, emitting a scorecard. By design it catches only compile/runtime bugs — logical scoping errors are left to the human reviewer.</dd>
+</dl>
+<aside class="callout insight"><strong>Insight — skills are duplicated, not shared</strong> A <code>mem0</code> SDK-reference skill exists in three places with three version numbers: <code>skills/mem0</code> (v3.0.0), <code>mem0-plugin/skills/mem0</code> (v0.1.1), and OpenClaw's own <code>memory-triage</code>/<code>memory-dream</code> prompts. They serve different host packaging conventions rather than a single shared source — verify which one a given install ships.</aside>
+</section>
+
+<section id="connections">
+<h2>How it all fits together</h2>
+<pre class="mermaid">
+flowchart LR
+  subgraph clients[Clients]
+    pyCLI[mem0-cli py]
+    nodeCLI[@mem0/cli]
+    plugin[mem0-plugin]
+    oc[openclaw-mem0]
+    vsdk[vercel-ai-provider]
+  end
+  pyCLI --> REST[(api.mem0.ai REST)]
+  nodeCLI --> REST
+  vsdk --> REST
+  plugin --> MCP[(mcp.mem0.ai MCP)]
+  oc --> SDK[mem0ai SDK]
+  SDK --> REST
+  SDK --> ENG[OSS Memory engine]
+  REST --> ENG
+</pre>
+<p>The CLIs and Vercel provider speak the hosted REST API directly; the editor plugin uses the remote MCP server; OpenClaw embeds the <code>mem0ai</code> SDK and can target either the hosted platform or a fully local <a href="memory-engine.html">Memory engine</a>. All paths converge on the same <a href="memory-algorithm.html">extraction/retrieval algorithm</a> and the scoping model from <a href="config-system.html">the configuration system</a>. For the hosted API surface these clients call, see <a href="client-sdk.html">Hosted Client &amp; Proxy</a> and <a href="server.html">the self-hosted server</a>; for the OSS storage layer OpenClaw can use, see <a href="vector-stores.html">vector stores</a>; the related self-hosted platform with its own MCP is <a href="openmemory.html">OpenMemory</a>.</p>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li><a href="client-sdk.html">Hosted Client &amp; Proxy</a></li><li><a href="memory-engine.html">Memory Engine</a></li><li><a href="config-system.html">Configuration System</a></li><li><a href="memory-algorithm.html">Memory Algorithm</a></li><li><a href="typescript-sdk.html">TypeScript SDK</a></li><li><a href="vector-stores.html">Vector Stores</a></li></ul></div><div><h4>Used by</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="glossary.html">Glossary &amp; Concept Index</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li></ul></div><div><h4>Related</h4><ul><li><a href="data-flow.html">Data Flow</a></li><li><a href="openmemory.html">OpenMemory Platform</a></li><li><a href="server.html">Self-Hosted Server</a></li></ul></div><div><h4>Source files</h4><ul><li><code>cli/python/src/mem0_cli/app.py</code> — Typer entrypoint; command panels, --agent/--json global-flag handling, scope resolution</li><li><code>cli/python/src/mem0_cli/commands/init_cmd.py</code> — Agent Mode dispatch rules (reuse env/config key, else mint shadow), email login, OTP claim trigger</li><li><code>cli/python/src/mem0_cli/commands/agent_mode_cmd.py</code> — POST /api/v1/auth/agent_mode/ bootstrap and in-place OTP claim upgrade</li><li><code>cli/python/src/mem0_cli/agent_detect.py</code> — Env-var agent context trigger list; identity is self-declared not sniffed</li><li><code>cli/python/src/mem0_cli/plugin_sync.py</code> — Atomic propagation of API key into existing Claude settings + shell rc entries</li><li><code>cli/python/src/mem0_cli/backend/base.py</code> — Backend ABC; factory returns PlatformBackend only — no OSS backend wired</li><li><code>cli/python/pyproject.toml</code> — Declares oss=[mem0ai] extra that is not consumed by the backend factory</li><li><code>cli/node/src/index.ts</code> — Commander-based Node CLI with feature parity and 5s ping validation</li><li><code>mem0-plugin/hooks.json</code> — SessionStart/UserPromptSubmit/PreToolUse/PostToolUse hook registration</li><li><code>mem0-plugin/.mcp.json</code> — Remote MCP server config interpolating ${MEM0_API_KEY} at session start</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

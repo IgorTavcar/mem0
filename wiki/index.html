@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Condensed, cross-linked knowledge graph of the mem0 codebase.">
+<meta name="generator" content="mem0-wiki-build">
+<title>mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "mem0 wiki", "description": "Condensed, cross-linked knowledge graph of the mem0 codebase.", "keywords": "", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html" class="active">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><span>Home</span></nav>
+    
+<section class="hero" id="overview">
+  <h1>mem0 &mdash; the memory layer for AI agents</h1>
+  <p class="tagline">An intelligent, persistent memory layer for AI assistants and agents. This wiki is a condensed,
+  cross-linked knowledge graph of the entire <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a>
+  codebase &mdash; architecture, the engine, the new retrieval algorithm, every provider layer, the SDKs, servers and ecosystem.</p>
+  <div class="badges">
+    <span class="badge hot">Apr-2026 algorithm</span>
+    <span class="badge">Apache-2.0</span>
+    <span class="badge">Python + TypeScript</span>
+    <span class="badge">Self-hosted &amp; hosted</span>
+    <span class="badge">Polyglot monorepo</span>
+  </div>
+</section>
+
+<section id="why">
+  <p>Start with <a href="architecture.html">Architecture</a> for the big picture, follow the <a href="data-flow.html">Data Flow</a>
+  to see <code>add()</code> and <code>search()</code> end to end, then dive into the <a href="memory-algorithm.html">Memory Algorithm</a>
+  &mdash; the single-pass, ADD-only extraction with multi-signal retrieval that drives the headline benchmark numbers below.
+  Curious what is clever or surprising? Jump straight to <a href="surprises.html">Surprises &amp; Gotchas</a>.</p>
+  <div class="metrics"><div class="metric"><div class="m-val">91.6</div><div class="m-label">LoCoMo</div></div><div class="metric"><div class="m-val">94.8</div><div class="m-label">LongMemEval</div></div><div class="metric"><div class="m-val">64.1</div><div class="m-label">BEAM (1M)</div></div><div class="metric"><div class="m-val">18+</div><div class="m-label">LLM providers</div></div><div class="metric"><div class="m-val">24+</div><div class="m-label">Vector stores</div></div><div class="metric"><div class="m-val">12+</div><div class="m-label">Embedders</div></div></div>
+  <p style="color:var(--text-dim);font-size:13px;margin-top:-6px">Benchmark scores are single-pass (one retrieval call, no agentic loops) &mdash; see <a href="evaluation.html">Evaluation</a>. Provider counts computed from the source tree at build time.</p>
+</section>
+
+<section id="graph">
+  <h2>Knowledge graph</h2>
+  <p>Each node is a page; arrows are &ldquo;uses&rdquo; dependencies. Click any node to open that page.</p>
+  <pre class="mermaid">
+flowchart LR
+  subgraph Overview["Overview"]
+    architecture["Architecture Overview"]
+    data_flow["Data Flow"]
+  end
+  subgraph Core["Core"]
+    memory_engine["Memory Engine"]
+    memory_algorithm["Memory Algorithm"]
+    config_system["Configuration System"]
+  end
+  subgraph Providers["Providers"]
+    llms["LLM Providers"]
+    embeddings["Embedding Providers"]
+    vector_stores["Vector Stores"]
+    rerankers["Rerankers"]
+    graph_memory["Graph Memory (deprecated)"]
+  end
+  subgraph Interfaces["Interfaces"]
+    client_sdk["Hosted Client & Proxy"]
+    server["Self-Hosted Server"]
+    typescript_sdk["TypeScript SDK"]
+    openmemory["OpenMemory Platform"]
+  end
+  subgraph Ecosystem["Ecosystem"]
+    integrations["Integrations & Ecosystem"]
+    evaluation["Evaluation & Benchmarks"]
+  end
+  subgraph Meta["Meta"]
+    surprises["Surprises & Gotchas"]
+  end
+  architecture --> config_system
+  architecture --> llms
+  architecture --> embeddings
+  architecture --> vector_stores
+  architecture --> rerankers
+  data_flow --> memory_algorithm
+  data_flow --> vector_stores
+  data_flow --> embeddings
+  data_flow --> rerankers
+  data_flow --> config_system
+  data_flow --> llms
+  memory_engine --> config_system
+  memory_engine --> llms
+  memory_engine --> embeddings
+  memory_engine --> vector_stores
+  memory_engine --> rerankers
+  memory_engine --> memory_algorithm
+  config_system --> llms
+  config_system --> embeddings
+  config_system --> vector_stores
+  config_system --> rerankers
+  llms --> config_system
+  llms --> memory_algorithm
+  embeddings --> config_system
+  embeddings --> vector_stores
+  vector_stores --> embeddings
+  vector_stores --> config_system
+  rerankers --> llms
+  rerankers --> config_system
+  graph_memory --> memory_algorithm
+  graph_memory --> vector_stores
+  graph_memory --> config_system
+  client_sdk --> memory_algorithm
+  client_sdk --> rerankers
+  client_sdk --> config_system
+  server --> memory_engine
+  server --> vector_stores
+  server --> config_system
+  server --> llms
+  server --> embeddings
+  server --> data_flow
+  server --> memory_algorithm
+  typescript_sdk --> memory_algorithm
+  typescript_sdk --> config_system
+  typescript_sdk --> llms
+  typescript_sdk --> embeddings
+  typescript_sdk --> vector_stores
+  openmemory --> memory_engine
+  openmemory --> vector_stores
+  openmemory --> config_system
+  openmemory --> llms
+  openmemory --> embeddings
+  openmemory --> memory_algorithm
+  integrations --> client_sdk
+  integrations --> memory_engine
+  integrations --> config_system
+  integrations --> memory_algorithm
+  integrations --> typescript_sdk
+  integrations --> vector_stores
+  evaluation --> memory_algorithm
+  evaluation --> client_sdk
+  evaluation --> data_flow
+  evaluation --> graph_memory
+  click architecture "architecture.html" "Architecture Overview"
+  click data_flow "data-flow.html" "Data Flow"
+  click memory_engine "memory-engine.html" "Memory Engine"
+  click memory_algorithm "memory-algorithm.html" "Memory Algorithm"
+  click config_system "config-system.html" "Configuration System"
+  click llms "llms.html" "LLM Providers"
+  click embeddings "embeddings.html" "Embedding Providers"
+  click vector_stores "vector-stores.html" "Vector Stores"
+  click rerankers "rerankers.html" "Rerankers"
+  click graph_memory "graph-memory.html" "Graph Memory (deprecated)"
+  click client_sdk "client-sdk.html" "Hosted Client & Proxy"
+  click server "server.html" "Self-Hosted Server"
+  click typescript_sdk "typescript-sdk.html" "TypeScript SDK"
+  click openmemory "openmemory.html" "OpenMemory Platform"
+  click integrations "integrations.html" "Integrations & Ecosystem"
+  click evaluation "evaluation.html" "Evaluation & Benchmarks"
+  click surprises "surprises.html" "Surprises & Gotchas"
+</pre>
+</section>
+
+<section id="areas">
+  <h2>Explore by area</h2>
+  <h2 id="area-overview">Overview</h2><div class="cards"><a class="card" href="architecture.html"><div class="card-eyebrow">Overview</div><div class="card-title">Architecture Overview</div><div class="card-desc">mem0 is a polyglot monorepo centered on the mem0 Python SDK (PyPI mem0ai) and its TypeScript twin mem0-ts, each exposing two usage modes fro</div></a><a class="card" href="data-flow.html"><div class="card-eyebrow">Overview</div><div class="card-title">Data Flow</div><div class="card-desc">Traces the two engine hot paths end to end. add() normalizes messages then runs either an infer=False verbatim fast path or the infer=True V</div></a></div>
+<h2 id="area-core">Core</h2><div class="cards"><a class="card" href="memory-engine.html"><div class="card-eyebrow">Core</div><div class="card-title">Memory Engine</div><div class="card-desc">The Memory Engine documents the OSS core of mem0: the Memory and AsyncMemory classes in mem0/memory/main.py, both built on the abstract Memo</div></a><a class="card" href="memory-algorithm.html"><div class="card-eyebrow">Core</div><div class="card-title">Memory Algorithm</div><div class="card-desc">The April-2026 (SDK v2.0.0/v3.0.0) rewrite of mem0&#x27;s memory pipeline: a single-pass ADD-only extractor (one LLM call, no UPDATE/DELETE, memo</div></a><a class="card" href="config-system.html"><div class="card-eyebrow">Core</div><div class="card-title">Configuration System</div><div class="card-desc">mem0 is configuration-driven: a single Pydantic v2 MemoryConfig (in mem0/configs/base.py) aggregates four {provider, config} sub-config wrap</div></a></div>
+<h2 id="area-providers">Providers</h2><div class="cards"><a class="card" href="llms.html"><div class="card-eyebrow">Providers</div><div class="card-title">LLM Providers</div><div class="card-desc">The LLM layer is a plugin family where every provider subclasses LLMBase and implements one generate_response method returning a string or a</div></a><a class="card" href="embeddings.html"><div class="card-eyebrow">Providers</div><div class="card-title">Embedding Providers</div><div class="card-desc">The embeddings layer converts text into dense vectors via a single abstract contract, EmbeddingBase.embed(text, memory_action), implemented </div></a><a class="card" href="vector-stores.html"><div class="card-eyebrow">Providers</div><div class="card-title">Vector Stores</div><div class="card-desc">The vector store layer persists each mem0 memory as a dense embedding plus a flat JSON payload across 24 pluggable backends behind one abstr</div></a><a class="card" href="rerankers.html"><div class="card-eyebrow">Providers</div><div class="card-title">Rerankers</div><div class="card-desc">The reranker layer is an optional, opt-in second-stage scorer that re-orders candidate memories returned by mem0&#x27;s multi-signal retrieval be</div></a><a class="card" href="graph-memory.html"><div class="card-eyebrow">Providers</div><div class="card-title">Graph Memory (deprecated)</div><div class="card-desc">Graph Memory was an optional relationship-aware retrieval layer that layered a property graph (Neo4j, Memgraph, Kuzu, Apache AGE, Amazon Nep</div></a></div>
+<h2 id="area-interfaces">Interfaces</h2><div class="cards"><a class="card" href="client-sdk.html"><div class="card-eyebrow">Interfaces</div><div class="card-title">Hosted Client &amp; Proxy</div><div class="card-desc">Documents the hosted-platform clients MemoryClient (sync) and AsyncMemoryClient (async) in mem0/client/main.py — thin httpx wrappers over ap</div></a><a class="card" href="server.html"><div class="card-eyebrow">Interfaces</div><div class="card-title">Self-Hosted Server</div><div class="card-desc">The server/ directory is a standalone FastAPI app that wraps the OSS Memory engine in a secure REST API plus a Next.js dashboard. Auth is on</div></a><a class="card" href="typescript-sdk.html"><div class="card-eyebrow">Interfaces</div><div class="card-title">TypeScript SDK</div><div class="card-desc">The mem0ai npm package (mem0-ts/) ships two surfaces: a thin hosted-platform client (import { MemoryClient } from &quot;mem0ai&quot;) and a self-conta</div></a><a class="card" href="openmemory.html"><div class="card-eyebrow">Interfaces</div><div class="card-title">OpenMemory Platform</div><div class="card-desc">OpenMemory is a self-hosted, single-user memory platform under openmemory/ that wraps the mem0 OSS Memory engine in a FastAPI service, expos</div></a></div>
+<h2 id="area-ecosystem">Ecosystem</h2><div class="cards"><a class="card" href="integrations.html"><div class="card-eyebrow">Ecosystem</div><div class="card-title">Integrations &amp; Ecosystem</div><div class="card-desc">Surveys mem0&#x27;s first-party clients and editor plugins: the Python (mem0-cli) and Node (@mem0/cli) CLIs with their Agent Mode &lt;5s key bootstr</div></a><a class="card" href="evaluation.html"><div class="card-eyebrow">Ecosystem</div><div class="card-title">Evaluation &amp; Benchmarks</div><div class="card-desc">mem0&#x27;s benchmarking harness under evaluation/ has two phases: a per-technique experiment runner (run_experiments.py) that drives the hosted </div></a></div>
+<h2 id="area-meta">Meta</h2><div class="cards"><a class="card" href="surprises.html"><div class="card-eyebrow">Meta</div><div class="card-title">Surprises &amp; Gotchas</div><div class="card-desc">Authored wiki/_src/bodies/surprises.html, the cross-cutting &quot;Surprises &amp; Gotchas&quot; page. Deduplicated and merged the 134 candidate findings i</div></a><a class="card" href="glossary.html"><div class="card-eyebrow">Meta</div><div class="card-title">Glossary &amp; Concept Index</div><div class="card-desc">All concepts indexed and grouped.</div></a></div>
+</section>
+
+<section id="agents">
+  <h2>For AI agents</h2>
+  <p>This wiki is built for machine retrieval as much as human reading:</p>
+  <ul>
+    <li><a href="concepts.json">concepts.json</a> &mdash; the full node/edge knowledge graph (pages, concepts, and their relationships).</li>
+    <li><a href="search-index.json">search-index.json</a> &mdash; per-page titles, summaries, headings and keywords powering the in-page search.</li>
+    <li>Every page carries a JSON-LD <code>TechArticle</code> block, stable section <code>id</code>s, and a machine-readable <em>Connections</em> footer (Uses / Used by / Related / Source files).</li>
+    <li>The <a href="glossary.html">Glossary</a> is a flat jump table of every named concept across the codebase.</li>
+  </ul>
+</section>
+<footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

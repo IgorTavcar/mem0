@@ -1,0 +1,433 @@
+<h1>Self-Hosted Server</h1>
+<p class="lead">
+  The <code>server/</code> directory is a standalone FastAPI application that wraps the OSS
+  <a href="memory-engine.html">Memory engine</a> in a secure REST API plus a Next.js dashboard. It is
+  <strong>secure by default</strong>: every memory endpoint requires a JWT, a per-user <code>X-API-Key</code>,
+  or the legacy <code>ADMIN_API_KEY</code> env var, and refuses to start without a <code>JWT_SECRET</code>
+  unless you explicitly set <code>AUTH_DISABLED=true</code> for local development. The service stack is
+  FastAPI + a single PostgreSQL instance (pgvector for memories, a separate <code>mem0_app</code> database for
+  auth/audit state managed by Alembic) + the dashboard. It is a distinct deployment from
+  <a href="openmemory.html">OpenMemory</a> and the <a href="client-sdk.html">hosted platform client</a>.
+</p>
+
+<aside class="callout decision">
+  <strong>Scope correction</strong> The server stack ships <em>no</em> Neo4j/APOC container. Its
+  <code>server/docker-compose.yaml</code> defines exactly three services — <code>mem0</code> (API),
+  <code>postgres</code> (<code>ankane/pgvector:v0.5.1</code>), and <code>mem0-dashboard</code>. Graph memory is
+  deprecated in OSS core; see <a href="graph-memory.html">Graph Memory</a>. The full graph DB stack lives only
+  in the <code>dev.Dockerfile</code> build (which installs <code>mem0ai[graph]</code>) and the hosted product,
+  not in the default self-hosted compose file.
+</aside>
+
+<section id="overview">
+  <h2>What the server is</h2>
+  <p>A thin, stateful HTTP layer over a single process-global <code>Memory</code> instance.</p>
+  <ul>
+    <li><strong>Entry point:</strong> <code>server/main.py</code> builds the <code>FastAPI</code> app, mounts four
+      routers, defines memory CRUD + search + config endpoints inline, and installs CORS, rate-limit, request-log,
+      and upstream-error middleware/handlers.</li>
+    <li><strong>Two databases, one Postgres server:</strong> the default <code>postgres</code> database holds the
+      pgvector <code>memories</code> collection; a second <code>mem0_app</code> database holds users, API keys,
+      request logs, refresh-token JTIs, and runtime config overrides. <code>server/init-db.sh</code> creates
+      <code>mem0_app</code> on first boot via a <code>\gexec</code> guarded <code>CREATE DATABASE</code>.</li>
+    <li><strong>Memory history</strong> is a SQLite file at <code>HISTORY_DB_PATH</code> (default
+      <code>/app/history/history.db</code>), bind-mounted to the host so it survives container rebuilds.</li>
+    <li><strong>Runtime config is mutable:</strong> the LLM/embedder/vector-store config starts from
+      <code>DEFAULT_CONFIG</code> in <code>main.py</code> and can be patched at runtime via
+      <code>POST /configure</code>, persisting to the <code>settings</code> table.</li>
+  </ul>
+
+  <pre class="mermaid">
+flowchart LR
+  client[REST client / SDK] -->|JWT or X-API-Key| api[FastAPI main.py]
+  dash[Next.js dashboard :3000] -->|JWT| api
+  api -->|memory CRUD/search| mem[Memory engine]
+  mem -->|vectors| pg[(Postgres: pgvector 'memories')]
+  mem -->|history| sqlite[(SQLite history.db)]
+  api -->|users / keys / logs / config| app[(Postgres: mem0_app)]
+  app -.->|Alembic migrations| pg
+  </pre>
+</section>
+
+<section id="endpoints">
+  <h2>Endpoints exposed</h2>
+  <p>Memory operations live directly on the app in <code>main.py</code>; auth, API-key, entity, and audit-log
+    operations are mounted from <code>server/routers/</code>. Every memory route depends on
+    <code>Depends(verify_auth)</code>.</p>
+
+  <h3>Memory &amp; configuration (main.py)</h3>
+  <table>
+    <thead><tr><th>Method &amp; path</th><th>Handler</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>POST /memories</code></td><td><code>add_memory</code></td><td>Requires at least one of <code>user_id/agent_id/run_id</code>; forwards <code>infer</code>, <code>memory_type</code>, <code>prompt</code>, <code>metadata</code> to <code>Memory.add()</code>.</td></tr>
+      <tr><td><code>GET /memories</code></td><td><code>get_all_memories</code></td><td>With an identifier → <code>get_all(filters=…)</code>; with none → lists up to <code>ALL_MEMORIES_LIMIT=1000</code> rows straight off <code>vector_store.list()</code>.</td></tr>
+      <tr><td><code>GET /memories/{id}</code></td><td><code>get_memory</code></td><td>Single memory by id.</td></tr>
+      <tr><td><code>POST /search</code></td><td><code>search_memories</code></td><td>Query + <code>filters</code> + optional <code>top_k</code>/<code>threshold</code>. See the <a href="#search-fix">/search 502 fix</a>.</td></tr>
+      <tr><td><code>PUT /memories/{id}</code></td><td><code>update_memory</code></td><td>Updates with <code>data=text</code> (string) and optional <code>metadata</code>.</td></tr>
+      <tr><td><code>GET /memories/{id}/history</code></td><td><code>memory_history</code></td><td>SQLite-backed change log for one memory.</td></tr>
+      <tr><td><code>DELETE /memories/{id}</code></td><td><code>delete_memory</code></td><td>Returns <code>MessageResponse</code>.</td></tr>
+      <tr><td><code>DELETE /memories</code></td><td><code>delete_all_memories</code></td><td>Requires an identifier; refuses to delete everything implicitly.</td></tr>
+      <tr><td><code>POST /reset</code></td><td><code>reset_memory</code></td><td>Full wipe via <code>Memory.reset()</code>.</td></tr>
+      <tr><td><code>GET /configure</code></td><td><code>get_config</code></td><td>Returns the live config with secrets redacted (<code>_redact_config</code>).</td></tr>
+      <tr><td><code>POST /configure</code></td><td><code>set_config</code></td><td>Deep-merges + persists; validates provider is bundled.</td></tr>
+      <tr><td><code>GET /configure/providers</code></td><td><code>list_bundled_providers</code></td><td>Lists the bundled LLM/embedder providers.</td></tr>
+      <tr><td><code>POST /generate-instructions</code></td><td><code>generate_instructions</code></td><td>Uses the live LLM to draft custom instructions + a test message for the setup wizard.</td></tr>
+      <tr><td><code>GET /</code></td><td><code>home</code></td><td>302 redirect to <code>/docs</code> (Swagger UI).</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Routers (server/routers/)</h3>
+  <dl>
+    <dt><code>routers/auth.py</code> — prefix <code>/auth</code></dt>
+    <dd><code>GET /auth/setup-status</code> (is any user present?), <code>POST /auth/register</code> (creates the
+      <em>first</em> admin, then closed), <code>POST /auth/login</code>, <code>POST /auth/refresh</code>,
+      <code>GET/PATCH /auth/me</code>, <code>POST /auth/change-password</code>,
+      <code>POST /auth/onboarding-complete</code>. Three endpoints carry per-IP rate limits.</dd>
+
+    <dt><code>routers/api_keys.py</code> — prefix <code>/api-keys</code></dt>
+    <dd><code>GET</code> (list the caller's non-revoked keys), <code>POST</code> (mint a key — the full secret is
+      returned <em>once</em>), <code>DELETE /{key_id}</code> (soft-revoke by setting <code>revoked_at</code>).</dd>
+
+    <dt><code>routers/entities.py</code> — prefix <code>/entities</code></dt>
+    <dd><code>GET</code> aggregates every <code>user_id</code>/<code>agent_id</code>/<code>run_id</code> across stored
+      memories with counts and timestamps; <code>DELETE /{entity_type}/{entity_id}</code> cascade-deletes that
+      entity's memories via <code>delete_all()</code>.</dd>
+
+    <dt><code>routers/requests.py</code> — prefix <code>/requests</code></dt>
+    <dd><code>GET</code> returns the most recent request-log rows (default 50, max 200), <strong>filtered to
+      API-key/admin-key traffic only</strong> (<code>auth_type in ("api_key","admin_api_key")</code>) so the audit
+      view shows programmatic usage rather than dashboard chatter.</dd>
+  </dl>
+</section>
+
+<section id="auth">
+  <h2>Authentication — on by default</h2>
+  <p>All auth logic is centralised in <code>server/auth.py</code>. The <code>verify_auth</code> dependency resolves
+    the caller from three credential sources, in priority order.</p>
+
+  <ol>
+    <li><strong>Bearer JWT</strong> (<code>Authorization: Bearer …</code>) — decoded with HS256, must be an
+      <code>access</code> token, resolves a <code>User</code> by <code>sub</code>. Tags request as <code>bearer</code>.</li>
+    <li><strong>Per-user API key</strong> (<code>X-API-Key</code>) — if it matches <code>ADMIN_API_KEY</code> via
+      <code>secrets.compare_digest</code>, the request is tagged <code>admin_api_key</code> and returns
+      <code>None</code> (no specific user). Otherwise it is looked up as a real per-user key (tagged
+      <code>api_key</code>).</li>
+    <li><strong>No credentials</strong> — if <code>AUTH_DISABLED</code>, tagged <code>disabled</code> and allowed;
+      otherwise <code>401</code> with <code>WWW-Authenticate: Bearer</code>.</li>
+  </ol>
+
+  <aside class="callout security">
+    <strong>Startup guardrails</strong> <code>main.py</code> raises <code>RuntimeError</code> at import time if auth
+    is enabled but <code>JWT_SECRET</code> is empty — the server simply will not boot misconfigured. If no admin
+    user and no <code>ADMIN_API_KEY</code> exist, <code>_warn_if_unconfigured()</code> logs a loud banner telling
+    operators to set <code>ADMIN_API_KEY</code>, register at <code>/setup</code>, or set <code>AUTH_DISABLED=true</code>.
+  </aside>
+
+  <h3>verify_auth vs require_auth</h3>
+  <dl>
+    <dt><code>verify_auth</code></dt>
+    <dd>Returns <code>User | None</code> — <code>None</code> is valid for admin-key/disabled callers. Used by memory
+      and entity endpoints, which operate on the shared <code>Memory</code> instance and don't need a concrete user.</dd>
+    <dt><code>require_auth</code></dt>
+    <dd>Guarantees a non-<code>None</code> <code>User</code>. For admin-key/disabled callers it falls back to the
+      <em>oldest</em> user (<code>_get_default_user</code>) so API-key and audit-log endpoints have an owner to attach
+      to. Used by <code>/api-keys</code>, <code>/requests</code>, and the authenticated <code>/auth/*</code> routes.</dd>
+  </dl>
+
+  <h3>API key format &amp; storage</h3>
+  <p><code>generate_api_key()</code> mints <code>m0sk_&lt;token_urlsafe(32)&gt;</code>, derives a 12-char
+    <code>key_prefix</code> for fast lookup, and stores only a <strong>bcrypt hash</strong> of the full key. On
+    auth, <code>_resolve_user_from_api_key</code> narrows candidates by prefix, then bcrypt-verifies each and stamps
+    <code>last_used_at</code>. The raw key is never persisted and never recoverable.</p>
+
+  <aside class="callout insight">
+    <strong>Constant-time login</strong> If an email isn't found, <code>login()</code> still calls
+    <code>dummy_verify_password()</code> to burn the same bcrypt cycles as a real verify, so response timing doesn't
+    leak whether an account exists. Login/register/refresh also carry per-IP <code>slowapi</code> limits.
+  </aside>
+
+  <h3>Single-use refresh tokens</h3>
+  <p>Each refresh token embeds a <code>jti</code> persisted in <code>refresh_token_jtis</code>.
+    <code>consume_refresh_jti()</code> uses a <em>conditional</em> <code>UPDATE … WHERE used_at IS NULL AND
+    expires_at &gt; now</code> and checks <code>rowcount</code> — closing the read-check-write race so concurrent
+    replays of the same token race on one row and at most one wins. Refresh therefore rotates: a used token is dead.</p>
+
+  <aside class="callout security">
+    <strong>At most one admin</strong> Migration <code>004_unique_admin_role.py</code> adds a partial unique index
+    <code>ix_users_only_one_admin</code> on <code>role</code> where <code>role = 'admin'</code>. Combined with
+    <code>register()</code>'s "registration is closed once any user exists" check (and its
+    <code>IntegrityError</code> rollback path), the very first registrant becomes the sole admin and the endpoint
+    locks shut.
+  </aside>
+</section>
+
+<section id="setup">
+  <h2>Bootstrap, setup wizard &amp; make targets</h2>
+  <p>Two paths get a fresh install to a usable state; both live in <code>server/Makefile</code>.</p>
+
+  <h3>Agent-first: <code>make bootstrap</code></h3>
+  <p><code>bootstrap</code> chains <code>up wait-api wait-dashboard seed</code>: it brings up the compose stack,
+    polls <code>/auth/setup-status</code> and the dashboard health endpoint until ready, then runs
+    <code>scripts/seed.sh</code>, which:</p>
+  <pre><code class="language-bash"># scripts/seed.sh (paraphrased)
+GET  /auth/setup-status            # needsSetup?
+POST /auth/register {name,email,password}   # create first admin if needed
+POST /auth/login    {email,password}         # obtain JWT
+POST /api-keys      {label:"dev-seed-key"}   # mint first API key (Bearer JWT)
+# prints email / password / API key in the "=== Ready ===" block, once</code></pre>
+  <p>If <code>EMAIL</code>/<code>PASSWORD</code>/<code>NAME</code> are unset, the script generates a random password
+    via <code>secrets.token_urlsafe(16)</code>. <code>OUTPUT=json make seed</code> emits machine-readable
+    credentials instead of the human block.</p>
+
+  <h3>Browser-first: the setup wizard</h3>
+  <p><code>make up</code> just starts the stack; the operator then opens <code>http://localhost:3000</code> and the
+    dashboard's wizard hits <code>/auth/setup-status</code> → <code>/auth/register</code> →
+    <code>/generate-instructions</code> → <code>/auth/onboarding-complete</code>. The wizard's use-case step (which
+    bootstrap skips) feeds <code>POST /generate-instructions</code>, where the live LLM drafts custom instructions
+    and a test message.</p>
+
+  <h3>Operational make targets</h3>
+  <dl>
+    <dt><code>make reset-admin-password EMAIL=… PASSWORD=…</code></dt>
+    <dd>Runs <code>scripts/reset_admin_password.py</code> inside the container — the supported password-recovery path
+      (re-hashes the user's password). Min length 8.</dd>
+    <dt><code>make prune-logs [REQUEST_LOG_RETENTION_DAYS=N]</code></dt>
+    <dd>Runs <code>scripts/prune_request_logs.py</code> — see <a href="#request-logging">request logging</a>.</dd>
+    <dt><code>make health</code> / <code>make clean</code></dt>
+    <dd>Health probe of API/dashboard/Postgres; <code>clean</code> = <code>docker compose down -v</code> (wipes the
+      Postgres volume and all data).</dd>
+  </dl>
+  <aside class="callout gotcha">
+    <strong>Bootstrap skips onboarding telemetry &amp; instructions</strong> Because <code>make bootstrap</code> hits
+    the API directly, it never reaches the wizard's success state, so it emits only the <code>admin_registered</code>
+    telemetry event (not <code>onboarding_completed</code>) and never sets custom instructions. Add them later with
+    <code>POST /configure</code>.
+  </aside>
+</section>
+
+<section id="stack">
+  <h2>Service stack &amp; Docker</h2>
+  <p><code>server/docker-compose.yaml</code> (project name <code>mem0-dev</code>) defines three services.</p>
+  <table>
+    <thead><tr><th>Service</th><th>Image / build</th><th>Ports</th><th>Role</th></tr></thead>
+    <tbody>
+      <tr><td><code>mem0</code></td><td><code>server/dev.Dockerfile</code> (python:3.12, installs <code>mem0ai[graph]</code> editable)</td><td>8888→8000</td><td>FastAPI + uvicorn <code>--reload</code></td></tr>
+      <tr><td><code>postgres</code></td><td><code>ankane/pgvector:v0.5.1</code></td><td>8432→5432</td><td>pgvector for memories + the <code>mem0_app</code> auth DB</td></tr>
+      <tr><td><code>mem0-dashboard</code></td><td><code>./dashboard</code> (Next.js)</td><td>3000→3000</td><td>Login, requests, memories, entities, API keys, config UI</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li>The <code>mem0</code> container startup command runs <code>alembic upgrade head</code> before
+      <code>uvicorn</code>, so the <code>mem0_app</code> schema is migrated on every boot.</li>
+    <li><code>depends_on … condition: service_healthy</code> gates the API on a Postgres
+      <code>pg_isready</code> healthcheck.</li>
+    <li>CORS in <code>main.py</code> allows only <code>DASHBOARD_URL</code> (default
+      <code>http://localhost:3000</code>) with credentials — not <code>*</code>.</li>
+    <li>The production <code>server/Dockerfile</code> is the slim variant (python:3.12-slim,
+      <code>requirements.txt</code> only) used by <code>make build</code>/<code>make run_local</code>.</li>
+  </ul>
+
+  <h3>Bundled providers gate</h3>
+  <p><code>BUNDLED_LLM_PROVIDERS = ("openai","anthropic","gemini")</code> and
+    <code>BUNDLED_EMBEDDER_PROVIDERS = ("openai","gemini")</code>. <code>_validate_bundled_providers()</code> rejects
+    <code>POST /configure</code> with a 400 if you select a provider whose package isn't in the image — pointing you
+    to add the package, rebuild, and extend the tuple. The defaults are <code>gpt-4.1-nano-2025-04-14</code> (LLM)
+    and <code>text-embedding-3-small</code> (embedder). See <a href="llms.html">LLM providers</a> and
+    <a href="embeddings.html">embedding providers</a> for the full provider catalog and
+    <a href="config-system.html">the config system</a> for how config dicts are wired.</p>
+</section>
+
+<section id="runtime-config">
+  <h2>Runtime config state</h2>
+  <p><code>server/server_state.py</code> owns a single process-global <code>Memory</code> instance behind an
+    <code>RLock</code>, rebuilt whenever config changes.</p>
+  <ul>
+    <li><code>initialize_state(DEFAULT_CONFIG)</code> loads any persisted overrides from the <code>settings</code>
+      table (key <code>config_overrides</code>), deep-merges them over the defaults, and constructs
+      <code>Memory.from_config()</code>.</li>
+    <li><code>update_config(updates)</code> deep-merges, rebuilds the <code>Memory</code> instance, and upserts the
+      merged overrides back to <code>settings</code> via a Postgres <code>INSERT … ON CONFLICT DO UPDATE</code>.</li>
+    <li><code>get_memory_instance()</code> is what every memory endpoint calls; it raises if the runtime was never
+      initialised.</li>
+  </ul>
+  <aside class="callout decision">
+    <strong>Overrides persist, secrets layer from env</strong> Config changes made in the dashboard survive restarts
+    (they live in the DB) and are re-applied <em>on top of</em> the <code>.env</code>-derived defaults, so rotating
+    an API key in <code>.env</code> still takes effect while UI-set model choices stick.
+  </aside>
+</section>
+
+<section id="rate-limiting">
+  <h2>Rate limiting</h2>
+  <p><code>server/rate_limit.py</code> exposes a single <code>slowapi</code> <code>Limiter</code> keyed by remote
+    address (<code>get_remote_address</code>). It is registered in <code>main.py</code> as
+    <code>app.state.limiter</code> with the <code>RateLimitExceeded</code> handler.</p>
+  <ul>
+    <li>Limits are applied <strong>only to auth endpoints</strong> via decorators:
+      <code>register</code> 5/min, <code>login</code> 10/min, <code>refresh</code> 20/min.</li>
+    <li>Memory CRUD/search endpoints are <em>not</em> rate-limited at this layer — put a reverse proxy in front for
+      that.</li>
+  </ul>
+</section>
+
+<section id="request-logging">
+  <h2>Request logging &amp; pruning</h2>
+  <p>An <code>@app.middleware("http")</code> hook (<code>log_requests</code>) assigns a per-request id, times the
+    request, sets <code>X-Request-ID</code> on the response, and persists a <code>RequestLog</code> row.</p>
+  <ul>
+    <li>Persistence is <strong>off the hot path</strong>: <code>_persist_request_log</code> runs via
+      <code>loop.run_in_executor()</code> in a thread so DB writes don't block the response.</li>
+    <li><code>_should_log_request</code> skips <code>OPTIONS</code>, the docs/health/openapi paths
+      (<code>SKIPPED_REQUEST_LOG_PATHS</code>), and anything under <code>/requests</code> — so the audit log doesn't
+      log views of itself.</li>
+    <li>Each row records method, path, status, <code>latency_ms</code>, and the <code>auth_type</code> tag set
+      during auth.</li>
+  </ul>
+
+  <aside class="callout perf">
+    <strong>Append-only table, BRIN-indexed, pruned by script</strong> <code>request_logs</code> grows ~864k
+    rows/day at 10 req/s. Migration <code>006_request_logs_brin.py</code> swaps the <code>created_at</code> btree for
+    a <strong>BRIN index</strong> so range deletes stay cheap on huge tables. <code>scripts/prune_request_logs.py</code>
+    (via <code>make prune-logs</code>) <code>DELETE</code>s rows older than <code>REQUEST_LOG_RETENTION_DAYS</code>
+    (default 30, min 1). Wire it into cron/systemd in production — nothing prunes automatically.
+  </aside>
+</section>
+
+<section id="errors">
+  <h2>Error handling &amp; the upstream classifier</h2>
+  <p><code>server/errors.py</code> turns raw provider/datastore exceptions into clean, classified HTTP 502s instead
+    of leaking stack traces.</p>
+  <ul>
+    <li>Every memory endpoint wraps its body in <code>try/except Exception → raise upstream_error()</code>.</li>
+    <li><code>upstream_error()</code> reads the live exception, runs <code>_classify()</code>, and raises an
+      <code>UpstreamError</code> (HTTP 502) carrying a stable <code>code</code> and the request id.</li>
+    <li><code>_classify()</code> walks the <code>__cause__</code>/<code>__context__</code> chain so a wrapped
+      provider error still classifies correctly, mapping to codes like <code>provider_auth_failed</code>,
+      <code>provider_rate_limited</code>, <code>provider_timeout</code>, <code>provider_unavailable</code>,
+      <code>datastore_unavailable</code>, or <code>vector_store_unavailable</code>.</li>
+    <li><code>install_request_id_logging()</code> injects the <code>request_id</code> contextvar into every log
+      record so logs and the <code>X-Request-ID</code> response header correlate.</li>
+  </ul>
+  <details>
+    <summary>Deep dive: how a bad OpenAI key surfaces</summary>
+    <p>If the LLM provider raises <code>AuthenticationError</code> (or any exception with <code>status_code</code>
+      401/403), <code>_classify_one</code> returns <code>("provider_auth_failed", "…Check your LLM provider API key
+      on the Configuration page.")</code>. The client gets <code>502 {"detail": …, "code":
+      "provider_auth_failed", "request_id": "ab12cd34"}</code> — actionable, no stack trace, and traceable in the
+      logs by request id. The seed script even warns about this case up front when no provider key is set in
+      <code>.env</code>.</p>
+  </details>
+</section>
+
+<section id="search-fix">
+  <h2>The /search 502 fix &amp; rich pgvector filters</h2>
+  <p>PR #5263 (<code>ad736d9a</code>, <em>"add rich filter operators and fix /search 502"</em>) changed both the
+    server and the <a href="vector-stores.html">pgvector store</a>.</p>
+
+  <h3>Server side</h3>
+  <p>The old <code>search_memories</code> splatted the whole request model into <code>Memory.search(**params)</code>,
+    which broke when top-level <code>user_id</code>/<code>agent_id</code>/<code>run_id</code> were passed alongside
+    <code>filters</code> — producing a 502. The fix folds the (now <strong>deprecated</strong>) top-level identifier
+    fields into the <code>filters</code> dict and only forwards <code>top_k</code>/<code>threshold</code> when set,
+    logging a deprecation warning when the legacy fields are used.</p>
+  <pre><code class="language-python"># server/main.py — search_memories (paraphrased)
+filters = search_req.filters or {}
+for entity_key in ("user_id", "agent_id", "run_id"):
+    val = getattr(search_req, entity_key, None)
+    if val is not None:
+        filters[entity_key] = val          # legacy fields -> filters
+params = {}
+if search_req.top_k is not None:    params["top_k"] = search_req.top_k
+if search_req.threshold is not None: params["threshold"] = search_req.threshold
+return get_memory_instance().search(query=search_req.query, filters=filters, **params)</code></pre>
+
+  <h3>pgvector side — rich operators</h3>
+  <p><code>mem0/vector_stores/pgvector.py</code> gained an <code>OPERATOR_SQL_MAP</code> and a
+    <code>_build_filter_conditions()</code> that compiles a filter dict into parameterised SQL against the JSONB
+    <code>payload</code> column.</p>
+  <table>
+    <thead><tr><th>Operator(s)</th><th>SQL</th></tr></thead>
+    <tbody>
+      <tr><td><code>eq</code> / <code>ne</code></td><td><code>payload-&gt;&gt;key = / != %s</code></td></tr>
+      <tr><td><code>gt</code> <code>gte</code> <code>lt</code> <code>lte</code></td><td><code>(payload-&gt;&gt;key)::numeric &lt;cmp&gt; %s</code> (value cast to float)</td></tr>
+      <tr><td><code>in</code> / <code>nin</code></td><td><code>payload-&gt;&gt;key = ANY(%s)</code> / negated</td></tr>
+      <tr><td><code>contains</code> / <code>icontains</code></td><td><code>payload-&gt;&gt;key LIKE / ILIKE %s</code> with LIKE-wildcards escaped + <code>ESCAPE '\'</code></td></tr>
+      <tr><td><code>$or</code> / <code>$not</code></td><td>recursively grouped <code>OR</code> / <code>NOT (…)</code> branches</td></tr>
+      <tr><td><code>"*"</code> sentinel</td><td><code>payload ? key</code> (key-exists check)</td></tr>
+    </tbody>
+  </table>
+  <aside class="callout security">
+    <strong>SQL-injection-safe by construction</strong> Every value goes through psycopg parameters, never string
+    interpolation; <code>contains</code>/<code>icontains</code> additionally escape <code>\ % _</code> before
+    building the pattern. A follow-up (PR #5264, <code>5a2201d7</code>) fixed boolean filter casing (booleans are
+    serialised with <code>json.dumps</code>), LIKE escaping, and TS scalar coercion. These operators flow through to
+    the server's <code>/search</code> and <code>GET /memories</code> filter params.
+  </aside>
+</section>
+
+<section id="db-models">
+  <h2>Database models &amp; Alembic</h2>
+  <p><code>server/db.py</code> builds the SQLAlchemy engine for the <code>mem0_app</code> database
+    (<code>postgresql+psycopg://…/${APP_DB_NAME}</code>, default <code>mem0_app</code>) with
+    <code>pool_pre_ping=True</code>, and exposes the <code>get_db</code> FastAPI dependency.
+    <code>server/models.py</code> declares five tables.</p>
+  <dl>
+    <dt><code>users</code> (<code>User</code>)</dt><dd>id (UUID), name, unique indexed email, bcrypt
+      <code>password_hash</code>, role (default <code>admin</code>), timestamps. Partial-unique index limits to one
+      admin.</dd>
+    <dt><code>api_keys</code> (<code>APIKey</code>)</dt><dd>id, <code>key_prefix</code>(12), bcrypt
+      <code>key_hash</code>, label, <code>created_by</code> FK→users (CASCADE), <code>last_used_at</code>,
+      <code>revoked_at</code> (soft delete).</dd>
+    <dt><code>request_logs</code> (<code>RequestLog</code>)</dt><dd>method, path, status_code, latency_ms,
+      auth_type, BRIN-indexed created_at.</dd>
+    <dt><code>refresh_token_jtis</code> (<code>RefreshTokenJti</code>)</dt><dd>jti PK, user FK (CASCADE),
+      <code>expires_at</code> (indexed), <code>used_at</code> — backs single-use refresh.</dd>
+    <dt><code>settings</code> (<code>Settings</code>)</dt><dd>key/value text store; row <code>config_overrides</code>
+      holds the JSON runtime config.</dd>
+  </dl>
+  <p>Migrations live in <code>server/alembic/versions/</code> (001→006). <code>alembic/env.py</code> imports
+    <code>models</code> so <code>Base.metadata</code> sees every table, and overrides <code>sqlalchemy.url</code>
+    with the runtime DB URL from <code>db._build_database_url()</code>, so migrations and the app always agree on the
+    target database.</p>
+  <details>
+    <summary>Deep dive: migration history</summary>
+    <ul>
+      <li><strong>001</strong> create <code>users</code> + <code>api_keys</code></li>
+      <li><strong>002</strong> create <code>request_logs</code></li>
+      <li><strong>003</strong> create <code>settings</code></li>
+      <li><strong>004</strong> partial unique index <code>ix_users_only_one_admin</code> (one admin)</li>
+      <li><strong>005</strong> create <code>refresh_token_jtis</code> (single-use refresh)</li>
+      <li><strong>006</strong> swap <code>request_logs.created_at</code> btree → BRIN index</li>
+    </ul>
+  </details>
+</section>
+
+<section id="telemetry">
+  <h2>Anonymous telemetry</h2>
+  <p><code>server/telemetry.py</code> sends at most two PostHog events per install, on by default
+    (<code>MEM0_TELEMETRY=true</code>), opt-out with <code>false</code>.</p>
+  <ul>
+    <li><code>admin_registered</code> — fired when the first admin is created (wizard or API).</li>
+    <li><code>onboarding_completed</code> — fired only when the dashboard wizard reaches success; API-only
+      bootstraps never emit it.</li>
+    <li>Properties: hashed-ish <em>email domain only</em> (not the address), <code>mem0.__version__</code>, and a
+      random per-install UUID persisted to <code>history/telemetry.json</code>. <code>_capture_once</code> dedupes
+      via that state file so each event fires at most once. No PII, no memory content.</li>
+  </ul>
+</section>
+
+<section id="relationships">
+  <h2>How it fits the wider repo</h2>
+  <ul>
+    <li>The server is one of the <a href="architecture.html">two usage modes</a>: it embeds the OSS
+      <a href="memory-engine.html">Memory engine</a> in-process and exposes it over HTTP — distinct from the
+      <a href="client-sdk.html">hosted MemoryClient</a> which talks to the managed platform.</li>
+    <li>Memory ops flow through the same <a href="data-flow.html">add()/search() data path</a> and
+      <a href="memory-algorithm.html">extraction algorithm</a> as the library; the server only adds auth, audit, and
+      config plumbing.</li>
+    <li>Persistence is <a href="vector-stores.html#interface">pgvector</a> for vectors + SQLite for history.</li>
+    <li>For a different self-hosted product (FastAPI + Alembic + MCP + a richer UI), see
+      <a href="openmemory.html">OpenMemory</a>. Cross-cutting patterns (constant-time login, single-use refresh,
+      BRIN pruning, the upstream classifier) are catalogued in <a href="surprises.html">Surprises &amp; Gotchas</a>.</li>
+  </ul>
+</section>

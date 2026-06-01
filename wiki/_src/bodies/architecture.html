@@ -1,0 +1,266 @@
+<h1>Architecture Overview</h1>
+<p class="lead">mem0 is a polyglot monorepo whose center of gravity is the <code>mem0</code> Python SDK (PyPI <code>mem0ai</code>) and its TypeScript twin <code>mem0-ts</code>. Both ship two usage modes from one import surface: a fully self-hosted <code>Memory</code>/<code>AsyncMemory</code> engine, and a thin hosted <code>MemoryClient</code> that calls the managed platform. The self-hosted engine is wired entirely by configuration: a single <code>MemoryConfig</code> Pydantic model drives four factories that instantiate concrete LLM, embedding, vector-store, and reranker providers behind abstract base classes. Graph memory, once a fifth provider category, has been removed from the OSS core.</p>
+
+<section id="monorepo">
+<h2>The polyglot monorepo</h2>
+<p>The repository is a single git tree holding multiple independently-published packages across Python, TypeScript/Node, and a Next.js frontend, plus servers, plugins, docs, and benchmarks. Each package has its own build/lint/test toolchain (Hatch + Ruff + pytest for Python; tsup + pnpm + jest/vitest for TS).</p>
+
+<dl>
+  <dt><code>mem0/</code> — Core Python SDK (<code>mem0ai</code>)</dt>
+  <dd>The reference implementation. Subpackages: <code>memory/</code> (the engine), <code>llms/</code>, <code>embeddings/</code>, <code>vector_stores/</code>, <code>reranker/</code>, <code>configs/</code>, <code>client/</code> (hosted), <code>proxy/</code>, <code>utils/</code>. See <a href="memory-engine.html">the Memory Engine</a>.</dd>
+
+  <dt><code>mem0-ts/</code> — TypeScript SDK (<code>mem0ai</code> on npm)</dt>
+  <dd>Two entry points mirroring Python: <code>src/client/</code> (hosted <code>MemoryClient</code>) and <code>src/oss/</code> (self-hosted <code>Memory</code>, imported as <code>mem0ai/oss</code>). The OSS tree under <code>mem0-ts/src/oss/src/</code> carries provider parity dirs <code>llms/</code>, <code>embeddings/</code>, <code>vector_stores/</code>. See <a href="typescript-sdk.html">the TypeScript SDK</a>.</dd>
+
+  <dt><code>cli/python/</code> and <code>cli/node/</code> — command-line clients</dt>
+  <dd>Two CLIs, both with entry point <code>mem0</code>: a Typer-based Python CLI (<code>mem0-cli</code> on PyPI, Python 3.10+) and a Commander-based Node CLI (<code>@mem0/cli</code> on npm). The Python CLI takes <code>mem0ai</code> as an optional <code>[oss]</code> extra. See <a href="integrations.html">Integrations</a>.</dd>
+
+  <dt><code>server/</code> — self-hosted REST API</dt>
+  <dd>A FastAPI server exposing the OSS engine over HTTP, packaged with Docker Compose (FastAPI + PostgreSQL/pgvector + Neo4j). See <a href="server.html">the Self-Hosted Server</a>.</dd>
+
+  <dt><code>openmemory/</code> — self-hosted memory platform</dt>
+  <dd>A larger product: <code>api/</code> (FastAPI + Alembic migrations + an MCP server) and <code>ui/</code> (Next.js 15 / React 19). Uses Qdrant as its vector store. See <a href="openmemory.html">the OpenMemory Platform</a>.</dd>
+
+  <dt><code>mem0-plugin/</code>, <code>openclaw/</code>, <code>vercel-ai-sdk/</code>, <code>skills/</code> — ecosystem</dt>
+  <dd>Editor/agent integrations: <code>mem0-plugin/</code> (MCP server connection + lifecycle hooks for Claude Code/Cursor/Codex), <code>openclaw/</code> (<code>@mem0/openclaw-mem0</code>), <code>vercel-ai-sdk/</code> (<code>@mem0/vercel-ai-provider</code>), and <code>skills/</code> (reference + pipeline skill definitions). See <a href="integrations.html">Integrations</a>.</dd>
+
+  <dt><code>evaluation/</code> and <code>docs/</code></dt>
+  <dd><code>evaluation/</code> is the benchmark harness (LoCoMo, LongMemEval, BEAM, RAG/full-context/LangMem/OpenAI baselines) — see <a href="evaluation.html">Evaluation &amp; Benchmarks</a>. <code>docs/</code> is the Mintlify documentation site.</dd>
+</dl>
+
+<aside class="callout insight"><strong>Insight</strong> Each TS package deliberately uses a different lint/test stack (Biome for the Node CLI, ESLint for the Vercel provider, Prettier+jest for the SDK). The monorepo is "polyglot" not just across languages but across toolchains — there is no single root build. The shared contract between Python and TS is the <em>shape</em> of the public API (<code>Memory</code>/<code>MemoryClient</code>, <code>add</code>/<code>search</code>/<code>get_all</code>/...), not shared code.</aside>
+</section>
+
+<section id="usage-modes">
+<h2>The two usage modes</h2>
+<p>Both modes are exported from the package root. <code>mem0/__init__.py</code> is intentionally tiny:</p>
+<pre><code class="language-python">from mem0.client.main import AsyncMemoryClient, MemoryClient  # noqa
+from mem0.memory.main import AsyncMemory, Memory              # noqa</code></pre>
+
+<h3>Self-hosted: <code>Memory</code> / <code>AsyncMemory</code></h3>
+<p>The OSS engine runs the entire memory pipeline in your process: it calls your configured LLM and embedder, writes vectors to your configured vector store, and tracks change history in a local SQLite DB.</p>
+<ul>
+  <li><strong>Defined in</strong> <code>mem0/memory/main.py</code> — both <code>Memory</code> and <code>AsyncMemory</code> subclass <code>MemoryBase</code> and accept a <code>MemoryConfig</code>.</li>
+  <li><strong>Construction</strong>: <code>Memory(config)</code> directly, or <code>Memory.from_config(config_dict)</code> which validates a dict into a <code>MemoryConfig</code> first.</li>
+  <li><strong>Default config</strong>: <code>Memory()</code> with no arguments builds a working stack — OpenAI LLM + OpenAI embedder + Qdrant vector store + SQLite history at <code>~/.mem0/history.db</code>.</li>
+</ul>
+
+<h3>Hosted: <code>MemoryClient</code> / <code>AsyncMemoryClient</code></h3>
+<p>The hosted client is an HTTP wrapper around the managed platform API at mem0.ai — no LLM/embedder/vector store runs locally. It exposes the same conceptual methods (<code>add</code>, <code>search</code>, <code>get_all</code>, ...) but the algorithm runs server-side.</p>
+<ul>
+  <li><strong>Defined in</strong> <code>mem0/client/main.py</code> (<code>MemoryClient</code> at the top, <code>AsyncMemoryClient</code> further down), with <code>project.py</code>, <code>types.py</code>, <code>utils.py</code> alongside.</li>
+  <li><strong>Proxy wrapper</strong>: <code>mem0/proxy/main.py</code> defines a <code>Mem0</code> class exposing an OpenAI-shaped <code>chat.completions.create</code> surface (<code>Chat</code> → <code>Completions</code>) that transparently injects retrieved memories. See <a href="client-sdk.html">the Hosted Client &amp; Proxy</a> for project APIs and the proxy.</li>
+</ul>
+
+<aside class="callout decision"><strong>Decision</strong> The same four symbols (sync/async × self-hosted/hosted) are exported from one namespace so callers switch modes by swapping the class name, not the import path. Everything else on this page — factories, providers, config — applies <em>only</em> to the self-hosted path; the hosted client owns none of that machinery.</aside>
+
+<pre class="mermaid">flowchart LR
+  App[Your application]
+  subgraph SelfHosted[Self-hosted: in your process]
+    Mem[Memory / AsyncMemory]
+    Cfg[MemoryConfig]
+    LLM[LLM provider]
+    Emb[Embedder provider]
+    VS[Vector store provider]
+    RR[Reranker provider optional]
+    Hist[SQLite history db]
+  end
+  subgraph Hosted[Hosted: managed platform]
+    Client[MemoryClient / AsyncMemoryClient]
+    API[platform API at mem0.ai]
+  end
+  App --> Mem
+  App --> Client
+  Cfg --> Mem
+  Mem --> LLM
+  Mem --> Emb
+  Mem --> VS
+  Mem --> RR
+  Mem --> Hist
+  Client --> API</pre>
+</section>
+
+<section id="provider-plugin-pattern">
+<h2>The provider plugin pattern</h2>
+<p>The self-hosted SDK is built around a single, repeated plugin shape. Each pluggable category is a directory containing an abstract <code>base.py</code>, concrete provider modules, and an <code>__init__.py</code>; configuration classes live separately under <code>mem0/configs/&lt;category&gt;/</code> and a factory in <code>mem0/utils/factory.py</code> maps a provider-name string to its class.</p>
+
+<h3>Categories and their real provider counts</h3>
+<p>The SDK currently ships <strong>four</strong> active provider categories. (Counts below were obtained by listing the directories and excluding <code>base.py</code>, <code>configs.py</code>, <code>__init__.py</code>, <code>utils.py</code>, and <code>mock.py</code> — these are infrastructure, not providers.)</p>
+
+<table>
+  <thead>
+    <tr><th>Category</th><th>Directory</th><th>Abstract base</th><th>Providers</th><th>Examples</th><th>Page</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>LLMs</td><td><code>mem0/llms/</code></td><td><code>LLMBase</code> (in <code>base.py</code>)</td><td>18</td>
+      <td>openai, anthropic, aws_bedrock, azure_openai (+ structured variants), gemini, groq, ollama, together, deepseek, minimax, vllm, lmstudio, xai, sarvam, litellm, langchain</td>
+      <td><a href="llms.html">LLM Providers</a></td>
+    </tr>
+    <tr>
+      <td>Embeddings</td><td><code>mem0/embeddings/</code></td><td><code>EmbeddingBase</code></td><td>11</td>
+      <td>openai, azure_openai, gemini, vertexai, huggingface, fastembed, together, ollama, lmstudio, aws_bedrock, langchain</td>
+      <td><a href="embeddings.html">Embedding Providers</a></td>
+    </tr>
+    <tr>
+      <td>Vector Stores</td><td><code>mem0/vector_stores/</code></td><td><code>VectorStoreBase</code></td><td>24</td>
+      <td>qdrant, chroma, pgvector, pinecone, milvus, mongodb, redis, valkey, elasticsearch, opensearch, weaviate, faiss, supabase, azure_ai_search, azure_mysql, databricks, baidu, cassandra, neptune_analytics, turbopuffer, s3_vectors, upstash_vector, vertex_ai_vector_search, langchain</td>
+      <td><a href="vector-stores.html">Vector Stores</a></td>
+    </tr>
+    <tr>
+      <td>Rerankers</td><td><code>mem0/reranker/</code></td><td><code>BaseReranker</code></td><td>5</td>
+      <td>cohere, sentence_transformer, zero_entropy, llm_reranker, huggingface</td>
+      <td><a href="rerankers.html">Rerankers</a></td>
+    </tr>
+  </tbody>
+</table>
+
+<aside class="callout gotcha"><strong>Gotcha: stale counts</strong> <code>AGENTS.md</code> advertises "24 LLMs / 30 vector stores / 15 embeddings / 4 graph stores / 5 rerankers". Those numbers do not match the tree: the actual factory-registered provider modules are 18 / 24 / 11 / (graphs removed) / 5. The reranker directory is <code>mem0/reranker/</code> (singular), not <code>rerankers/</code>; reranker provider files carry a <code>_reranker</code> suffix (e.g. <code>cohere_reranker.py</code>). Always count the directory, not the docs.</aside>
+
+<h3>The four anatomy parts of a provider</h3>
+<dl>
+  <dt>1. Abstract base (<code>&lt;category&gt;/base.py</code>)</dt>
+  <dd>Defines the contract. <code>VectorStoreBase</code> is the richest — abstract <code>create_col</code>, <code>insert</code>, <code>search</code>, <code>delete</code>, <code>update</code>, <code>get</code>, <code>list</code>, <code>reset</code>, etc., plus a non-abstract <code>keyword_search</code> with a default no-op that BM25-capable stores override (this powers <a href="memory-algorithm.html">multi-signal retrieval</a>). <code>BaseReranker</code> declares a single abstract <code>rerank(query, documents, top_k)</code>.</dd>
+
+  <dt>2. Concrete provider (<code>&lt;category&gt;/&lt;name&gt;.py</code>)</dt>
+  <dd>One file per provider, snake_case, subclassing the base. E.g. <code>mem0/vector_stores/qdrant.py</code> defines <code>Qdrant</code>; <code>mem0/llms/anthropic.py</code> defines <code>AnthropicLLM</code>.</dd>
+
+  <dt>3. Config class (<code>mem0/configs/&lt;category&gt;/&lt;name&gt;.py</code> or shared base)</dt>
+  <dd>Provider-specific Pydantic config. LLMs and rerankers map each provider to a dedicated config class (e.g. <code>AnthropicConfig</code>, <code>CohereRerankerConfig</code>) or fall back to <code>BaseLlmConfig</code>. Embeddings share one <code>BaseEmbedderConfig</code>. Each vector store has its own config under <code>mem0/configs/vector_stores/</code>.</dd>
+
+  <dt>4. Registry + factory mapping</dt>
+  <dd>The <code>__init__.py</code> re-exports selected classes, and the relevant factory in <code>mem0/utils/factory.py</code> holds the authoritative <code>provider_to_class</code> dict mapping name → dotted import path (and, for LLMs/rerankers, a config class). See <a href="config-system.html">the Configuration System</a>.</dd>
+</dl>
+
+<aside class="callout insight"><strong>Insight: dotted-string lazy loading</strong> Factories store providers as <em>strings</em> (e.g. <code>"mem0.vector_stores.qdrant.Qdrant"</code>) and import them on demand via <code>load_class</code>, which does <code>importlib.import_module</code> + <code>getattr</code>. This is why a heavy optional dependency (pinecone, weaviate, faiss) is only imported when that provider is actually selected — installing <code>mem0ai</code> does not pull every backend's SDK. Unknown provider names raise a <code>ValueError</code> at <code>create()</code> time.</aside>
+
+<details>
+<summary>Deep dive: why <code>__init__.py</code> registries are partial</summary>
+<p>The category <code>__init__.py</code> files are not the source of truth for which providers exist — the factory dicts are. For example <code>mem0/reranker/__init__.py</code> only re-exports <code>BaseReranker</code>, <code>CohereReranker</code>, and <code>SentenceTransformerReranker</code>, even though <code>RerankerFactory</code> can build five providers. <code>mem0/llms/__init__.py</code> is empty. The registries exist for convenience re-exports; the factory's <code>provider_to_class</code> is what <code>Memory</code> consults at construction time. When auditing "what's supported", read the factory, not the package init.</p>
+</details>
+</section>
+
+<section id="config-driven-wiring">
+<h2>Config-driven wiring: MemoryConfig → factories → instances</h2>
+<p>The engine never imports a provider directly. Construction is a pure function of <code>MemoryConfig</code>: each sub-config names a provider and carries a free-form <code>config</code> dict, and the matching factory turns that pair into a live instance.</p>
+
+<h3><code>MemoryConfig</code> (in <code>mem0/configs/base.py</code>)</h3>
+<ul>
+  <li><code>vector_store: VectorStoreConfig</code> — default provider <code>qdrant</code>.</li>
+  <li><code>llm: LlmConfig</code> — default provider <code>openai</code>.</li>
+  <li><code>embedder: EmbedderConfig</code> — default provider <code>openai</code>.</li>
+  <li><code>reranker: Optional[RerankerConfig]</code> — defaults to <code>None</code> (reranking is opt-in).</li>
+  <li><code>history_db_path: str</code> — default <code>~/.mem0/history.db</code> (overridable via <code>MEM0_DIR</code>).</li>
+  <li><code>version: str</code> — default <code>"v1.1"</code>; <code>custom_instructions: Optional[str]</code> for fact-extraction tuning.</li>
+</ul>
+<p>Each sub-config is a tiny two-field Pydantic model: a <code>provider</code> string and a <code>config</code> dict, with a validator that rejects unknown providers. For example <code>LlmConfig</code> and <code>EmbedderConfig</code> validate <code>provider</code> against an allow-list; <code>VectorStoreConfig</code> goes further and uses a <code>model_validator</code> to dynamically import and construct the provider-specific config class from <code>mem0/configs/vector_stores/&lt;provider&gt;</code>.</p>
+
+<pre><code class="language-python"># What Memory.__init__ does (mem0/memory/main.py), in essence:
+self.embedding_model = EmbedderFactory.create(
+    self.config.embedder.provider,
+    self.config.embedder.config,
+    self.config.vector_store.config,   # for embedded-store special cases
+)
+self.vector_store = VectorStoreFactory.create(
+    self.config.vector_store.provider, self.config.vector_store.config,
+)
+self.llm = LlmFactory.create(self.config.llm.provider, self.config.llm.config)
+self.db = SQLiteManager(self.config.history_db_path)
+
+self.reranker = None
+if config.reranker:                    # opt-in only
+    self.reranker = RerankerFactory.create(
+        config.reranker.provider, config.reranker.config,
+    )</code></pre>
+
+<h3>The four factories</h3>
+<p>All four live in <code>mem0/utils/factory.py</code>. They share the <code>load_class</code> helper but differ in how much config-coercion they do:</p>
+<dl>
+  <dt><code>LlmFactory.create(provider, config, **kwargs)</code></dt>
+  <dd>Most elaborate. Maps each provider to <em>both</em> a class path and a config class; coerces dicts, merges kwargs, and even upgrades a generic <code>BaseLlmConfig</code> into a provider-specific config by copying common fields (model, temperature, api_key, max_tokens, vision flags, ...). Supports runtime <code>register_provider</code> and <code>get_supported_providers</code>.</dd>
+  <dt><code>EmbedderFactory.create(provider, config, vector_config)</code></dt>
+  <dd>Simplest mapping (name → class path). Wraps the dict in a single <code>BaseEmbedderConfig</code>. Special case: when the vector store is <code>upstash_vector</code> with <code>enable_embeddings</code>, it returns a <code>MockEmbeddings</code> so the store does its own embedding.</dd>
+  <dt><code>VectorStoreFactory.create(provider, config)</code></dt>
+  <dd>Name → class path; <code>model_dump()</code>s a Pydantic config to a dict and splats it as kwargs into the store constructor. Also exposes <code>reset(instance)</code>.</dd>
+  <dt><code>RerankerFactory.create(provider, config, **kwargs)</code></dt>
+  <dd>Name → (class path, config class); validates config type and raises a wrapped <code>ImportError</code> if the optional reranker dependency is missing.</dd>
+</dl>
+
+<aside class="callout perf"><strong>Perf: where the factories are called</strong> Factories run once, at <code>Memory.__init__</code> — provider instances are cached as instance attributes (<code>self.llm</code>, <code>self.embedding_model</code>, <code>self.vector_store</code>, <code>self.reranker</code>). The hot paths (<code>add</code>/<code>search</code>) reuse those instances; see <a href="data-flow.html">Data Flow</a>. A separate <code>_entity_store</code> vector collection is built lazily on first use, cloning the main vector-store config and (for Qdrant embedded mode) sharing the underlying client to avoid RocksDB lock contention.</aside>
+
+<pre class="mermaid">flowchart TD
+  MC[MemoryConfig]
+  MC --> LC[llm: LlmConfig]
+  MC --> EC[embedder: EmbedderConfig]
+  MC --> VC[vector_store: VectorStoreConfig]
+  MC --> RC[reranker: RerankerConfig optional]
+  LC --> LF[LlmFactory]
+  EC --> EF[EmbedderFactory]
+  VC --> VF[VectorStoreFactory]
+  RC --> RF[RerankerFactory]
+  LF --> LI[self.llm  e.g. AnthropicLLM]
+  EF --> EI[self.embedding_model  e.g. OpenAIEmbedding]
+  VF --> VI[self.vector_store  e.g. Qdrant]
+  RF --> RI[self.reranker  e.g. CohereReranker]
+  LI --> ENG[Memory engine]
+  EI --> ENG
+  VI --> ENG
+  RI --> ENG</pre>
+</section>
+
+<section id="graph-memory-status">
+<h2>Graph memory: removed from the OSS core</h2>
+<p>Earlier mem0 versions treated graph stores (Neo4j, Memgraph, Kuzu, Apache AGE) as a fifth provider category layered on top of vector memory for relationship-aware retrieval. <strong>That category no longer exists in the OSS core.</strong></p>
+<ul>
+  <li><strong>No <code>mem0/graphs/</code> directory</strong> — verified by listing <code>mem0/</code> (subpackages are <code>client</code>, <code>configs</code>, <code>embeddings</code>, <code>llms</code>, <code>memory</code>, <code>proxy</code>, <code>reranker</code>, <code>utils</code>, <code>vector_stores</code>; no <code>graphs</code>).</li>
+  <li><strong>No graph factory</strong> — <code>mem0/utils/factory.py</code> exposes only <code>LlmFactory</code>, <code>EmbedderFactory</code>, <code>VectorStoreFactory</code>, <code>RerankerFactory</code>.</li>
+  <li><strong>No <code>graph</code> field on <code>MemoryConfig</code></strong> — the model in <code>mem0/configs/base.py</code> has no <code>graph</code> section.</li>
+  <li><strong>No graph references in the engine</strong> — <code>grep -in graph mem0/memory/main.py</code> returns nothing.</li>
+  <li><strong>TS SDK matches</strong> — <code>mem0-ts/src/oss/src/</code> likewise has no <code>graphs/</code> directory (again contradicting <code>AGENTS.md</code>, which still lists <code>src/graphs/</code>).</li>
+</ul>
+<p>Relationship awareness is now handled inside the vector pipeline as <strong>entity linking</strong>: entities are extracted, embedded into a sibling <code>&lt;collection&gt;_entities</code> store, and used as a retrieval signal fused with semantic and BM25 scores. See <a href="memory-algorithm.html#entity-linking">the algorithm's entity linking</a> and the full history in <a href="graph-memory.html">Graph Memory (deprecated)</a>.</p>
+
+<aside class="callout decision"><strong>Decision</strong> The April 2026 algorithm rewrite folded relationship retrieval into the single vector-store path (entity linking + multi-signal fusion) rather than maintaining a parallel graph database. This is why the OSS engine now needs only four provider categories. Note that the <code>server/</code> Docker stack still provisions Neo4j and <code>evaluation/</code> still has <code>run-mem0-plus-*</code> graph targets — references to "graph memory" elsewhere in the repo are legacy or platform-side, not OSS-core.</aside>
+</section>
+
+<section id="putting-it-together">
+<h2>Putting it together</h2>
+<p>A typical self-hosted setup is fully declarative:</p>
+<pre><code class="language-python">from mem0 import Memory
+
+m = Memory.from_config({
+    "llm":          {"provider": "anthropic", "config": {"model": "claude-..."}},
+    "embedder":     {"provider": "openai",    "config": {"model": "text-embedding-3-small"}},
+    "vector_store": {"provider": "qdrant",    "config": {"host": "localhost", "port": 6333}},
+    # reranker omitted -> reranking disabled
+})
+m.add("I prefer window seats", user_id="u1")
+m.search("seat preference", user_id="u1")</code></pre>
+<p>To swap any backend you change a single <code>provider</code> string; to use the managed platform instead you replace <code>Memory</code> with <code>MemoryClient</code> and drop the config entirely. From here:</p>
+<ul>
+  <li>Trace what <code>add()</code> and <code>search()</code> actually do in <a href="data-flow.html">Data Flow</a>.</li>
+  <li>Read engine internals (sync vs async, SQLite history, telemetry) in <a href="memory-engine.html">the Memory Engine</a>.</li>
+  <li>Understand retrieval ranking in <a href="memory-algorithm.html">the Memory Algorithm</a>.</li>
+  <li>Dig into config classes and enums in <a href="config-system.html">the Configuration System</a>.</li>
+  <li>Cross-cutting clever patterns and gotchas live in <a href="surprises.html">Surprises &amp; Gotchas</a>.</li>
+</ul>
+</section>
+
+<section id="testing-cicd"><h2>Testing &amp; CI/CD</h2>
+<p>The Python SDK is exercised by <strong>73 pytest files</strong> under <code>tests/</code>, organised to mirror the provider layout: <code>tests/configs/</code>, <code>tests/embeddings/</code>, <code>tests/llms/</code>, <code>tests/memory/</code>, <code>tests/rerankers/</code>, <code>tests/utils/</code> and <code>tests/vector_stores/</code>. Provider tests follow the same shape as the <a href="config-system.html">config</a> and provider modules they cover, so adding a provider means adding a parallel test directory.</p>
+<p>Sixteen GitHub Actions workflows in <code>.github/workflows/</code> split into continuous integration (lint + typecheck + test per package) and continuous delivery (tag-triggered publish). Because this is a <a href="#monorepo">polyglot monorepo</a>, each package is versioned and released <em>independently</em> via its own tag prefix.</p>
+<table>
+<thead><tr><th>Package</th><th>CI workflow</th><th>Checks</th><th>CD tag &rarr; target</th></tr></thead>
+<tbody>
+<tr><td>Python SDK</td><td><code>ci.yml</code></td><td>Ruff + pytest (3.10&ndash;3.12)</td><td><code>v*</code> &rarr; PyPI <code>mem0ai</code></td></tr>
+<tr><td>TypeScript SDK</td><td><code>ts-sdk-ci.yml</code></td><td>Prettier + build + jest (Node 20/22)</td><td><code>ts-v*</code> &rarr; npm <code>mem0ai</code></td></tr>
+<tr><td>Python CLI</td><td><code>cli-python-ci.yml</code></td><td>Ruff + pytest + hatch build</td><td><code>cli-v*</code> &rarr; PyPI <code>mem0-cli</code></td></tr>
+<tr><td>Node CLI</td><td><code>cli-node-ci.yml</code></td><td>Biome + tsc + vitest + tsup</td><td><code>cli-node-v*</code> &rarr; npm <code>@mem0/cli</code></td></tr>
+<tr><td>OpenClaw</td><td><code>openclaw-checks.yml</code></td><td>tsc + vitest (Codecov) + tsup</td><td><code>openclaw-v*</code> &rarr; npm</td></tr>
+<tr><td>OpenCode plugin</td><td><code>opencode-plugin-checks.yml</code></td><td>Bun typecheck + build</td><td><code>opencode-v*</code> &rarr; npm</td></tr>
+<tr><td>Vercel AI provider</td><td>&mdash;</td><td>(jest + vitest locally)</td><td><code>vercel-ai-v*</code> &rarr; npm</td></tr>
+</tbody>
+</table>
+<aside class="callout decision"><strong>Why</strong> Per-package tag prefixes let the SDK, CLIs, and plugins ship on independent cadences from one repo. All publishing uses <strong>OIDC trusted publishing</strong> &mdash; no long-lived tokens or secrets live in CI; the first publish of a brand-new npm package is the only manual step.</aside>
+<aside class="callout gotcha"><strong>Gotcha</strong> <code>docs-llms-txt-check.yml</code> fails any PR that edits <code>docs/**/*.mdx</code> without re-syncing <code>docs/llms.txt</code>. Fix locally with <code>python scripts/check-llms-txt-coverage.py --write</code>. Utility workflows <code>issue-labeler.yml</code> and <code>stale.yml</code> round out the set. See the <a href="integrations.html">ecosystem page</a> for what each published package does.</aside>
+</section>

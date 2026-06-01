@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="OpenMemory is a self-hosted, single-user memory platform under openmemory/ that wraps the mem0 OSS Memory engine in a FastAPI service, exposes five memory tools over an MCP server (port 8765, SSE + Streamable HTTP transports), and ships a Next.js 15 / React 19 dashboard (port 3000) backed by Redux Toolkit. It keeps a relational SQLite mirror (state, ACLs, audit logs, categories) alongside vectors stored in Qdrant by default (port 6333), with provider auto-detection and a three-revision Alembic chain. It is operationally distinct from server/: no auth, open CORS, one implicit user, intended for local use.">
+<meta name="generator" content="mem0-wiki-build">
+<title>OpenMemory Platform · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "OpenMemory Platform", "description": "OpenMemory is a self-hosted, single-user memory platform under openmemory/ that wraps the mem0 OSS Memory engine in a FastAPI service, exposes five memory tools over an MCP server (port 8765, SSE + Streamable HTTP transports), and ships a Next.js 15 / React 19 dashboard (port 3000) backed by Redux Toolkit. It keeps a relational SQLite mirror (state, ACLs, audit logs, categories) alongside vectors stored in Qdrant by default (port 6333), with provider auto-detection and a three-revision Alembic chain. It is operationally distinct from server/: no auth, open CORS, one implicit user, intended for local use.", "keywords": "openmemory, mcp server, model context protocol, FastMCP, add_memories, search_memory, port 8765, qdrant 6333, next.js dashboard, redux toolkit, alembic migration chain, sqlite mirror", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html" class="active">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Interfaces</span><span class="sep">/</span><span>OpenMemory Platform</span></nav>
+    <h1>OpenMemory Platform</h1>
+<p class="lead">OpenMemory is a self-hosted, single-user memory <em>platform</em> that wraps the mem0 OSS <a href="memory-engine.html">Memory engine</a> in a FastAPI service, exposes memory operations to any MCP client over an MCP server, and ships a Next.js 15 / React 19 dashboard. It is operationally distinct from the multi-tenant <a href="server.html">self-hosted server</a>: it has no API-key auth, persists a relational mirror of every memory in SQLite (via SQLAlchemy + Alembic), and stores vectors in Qdrant by default. It lives entirely under <code>openmemory/</code> and is deployed as a three-container Docker Compose stack.</p>
+
+<section id="overview">
+<h2>What OpenMemory is (and is not)</h2>
+<p>A locally deployable "memory layer for AI agents" with a dashboard, an MCP endpoint, and a REST API — built to give one developer a persistent, inspectable memory store across MCP-capable tools (Claude Desktop, Cursor, Cline, Windsurf, etc.).</p>
+<dl>
+  <dt>Three processes</dt>
+  <dd><strong>API/MCP</strong> (FastAPI + uvicorn, port <code>8765</code>), <strong>UI</strong> (Next.js, port <code>3000</code>), and the <strong>vector store</strong> (Qdrant <code>mem0_store</code>, port <code>6333</code>). Defined in <code>openmemory/docker-compose.yml</code>.</dd>
+  <dt>Two data planes</dt>
+  <dd>The mem0 engine owns the <strong>vectors</strong> in Qdrant; the FastAPI app owns a parallel <strong>relational mirror</strong> in SQLite (<code>openmemory.db</code>) that tracks memory state, app ownership, access logs, categories, and ACLs. Memory IDs are shared between the two stores (the SQLite row reuses the UUID minted by mem0/Qdrant).</dd>
+  <dt>Single-user by design</dt>
+  <dd>There is no authentication. A default user (<code>USER</code> env var, falling back to <code>default_user</code>) and a default app (<code>"openmemory"</code>) are created on startup by <code>create_default_user()</code> / <code>create_default_app()</code> in <code>api/main.py</code>. CORS is wide open (<code>allow_origins=["*"]</code>).</dd>
+</dl>
+<aside class="callout decision"><strong>Distinct from <code>server/</code></strong> Both are FastAPI apps that wrap the same engine, but they do not share code. <a href="server.html">server/</a> is a multi-tenant hosted-API clone with API keys, rate limiting, and Postgres+pgvector+Neo4j bootstrap. OpenMemory is a single-user desktop-companion platform whose differentiators are the <em>MCP server</em>, the <em>relational ACL/audit mirror</em>, and the <em>Next.js dashboard</em>. When documenting auth or multi-tenancy, you almost always mean <code>server/</code>, not this page.</aside>
+
+<pre class="mermaid">
+flowchart LR
+  subgraph clients[MCP clients]
+    C1[Claude Desktop]
+    C2[Cursor / Cline / Windsurf]
+  end
+  C1 & C2 -->|SSE or Streamable HTTP| MCP[MCP router /mcp]
+  Browser -->|axios REST| API[FastAPI /api/v1]
+  MCP --> ENG[mem0 Memory engine]
+  API --> ENG
+  API --> DB[(SQLite mirror)]
+  MCP --> DB
+  ENG -->|vectors| QD[(Qdrant :6333)]
+  ENG -->|LLM / embeddings| OAI[OpenAI / Ollama / ...]
+  UI[Next.js dashboard :3000] --> Browser
+</pre>
+</section>
+
+<section id="application-bootstrap">
+<h2>Application bootstrap</h2>
+<p>The entire app is wired in <code>api/main.py</code> at import time — there is no lifespan handler.</p>
+<ul>
+  <li><strong>Table creation:</strong> <code>Base.metadata.create_all(bind=engine)</code> runs at import, creating all tables directly from the SQLAlchemy models in <code>api/app/models.py</code>.</li>
+  <li><strong>Seeding:</strong> <code>create_default_user()</code> and <code>create_default_app()</code> ensure the singleton user/app rows exist.</li>
+  <li><strong>MCP mount:</strong> <code>setup_mcp_server(app)</code> includes the MCP router (prefix <code>/mcp</code>).</li>
+  <li><strong>Routers:</strong> five routers are mounted — <code>memories</code>, <code>apps</code>, <code>stats</code>, <code>config</code>, <code>backup</code> — re-exported from <code>api/app/routers/__init__.py</code>.</li>
+  <li><strong>Pagination:</strong> <code>add_pagination(app)</code> installs <code>fastapi-pagination</code>.</li>
+</ul>
+<aside class="callout gotcha"><strong>create_all + Alembic both create the schema</strong> Because <code>main.py</code> calls <code>Base.metadata.create_all()</code> at startup, a fresh container builds the schema directly from the ORM models — the <a href="#alembic">Alembic chain</a> is a <em>parallel</em>, manually-invoked mechanism (<code>make migrate</code> → <code>alembic upgrade head</code>), not part of the boot path. On a brand-new DB the two will agree; on an <em>existing</em> DB only Alembic applies incremental changes. This dual ownership of the schema is a real footgun: a model change that you forget to encode as a migration will silently appear on new installs but never on upgraded ones.</aside>
+</section>
+
+<section id="mcp-server">
+<h2>The MCP server</h2>
+<p><code>api/app/mcp_server.py</code> builds a <code>FastMCP("mem0-mcp-server")</code> instance and exposes memory operations as MCP tools. It is mounted into the same FastAPI process under the <code>/mcp</code> prefix (so the MCP endpoint and the REST API share port <code>8765</code>).</p>
+
+<h3>Exposed MCP tools</h3>
+<p>There are exactly five <code>@mcp.tool</code>-decorated coroutines:</p>
+<table>
+  <thead><tr><th>Tool</th><th>Signature</th><th>Behaviour</th></tr></thead>
+  <tbody>
+    <tr><td><code>add_memories</code></td><td><code>(text: str, infer: bool = True)</code></td><td>Calls <code>memory_client.add(...)</code> with <code>metadata={source_app:"openmemory", mcp_client:&lt;client&gt;}</code>, then reconciles the returned <code>ADD</code>/<code>DELETE</code> events into the SQLite mirror (creating <code>Memory</code> rows + <code>MemoryStatusHistory</code> entries). <code>infer=False</code> stores text verbatim (no LLM fact extraction).</td></tr>
+    <tr><td><code>search_memory</code></td><td><code>(query: str)</code></td><td>Embeds the query via <code>memory_client.embedding_model.embed(query,"search")</code>, calls <code>memory_client.vector_store.search(...)</code> directly with <code>limit=10</code> and <code>filters={user_id}</code>, then filters hits through the ACL and writes a <code>search</code> access log per result.</td></tr>
+    <tr><td><code>list_memories</code></td><td><code>()</code></td><td><code>memory_client.get_all(user_id)</code>, filtered by per-memory ACL, with a <code>list</code> access log per returned item.</td></tr>
+    <tr><td><code>delete_memories</code></td><td><code>(memory_ids: list[str])</code></td><td>Deletes only IDs that are both requested <em>and</em> ACL-accessible from the vector store, soft-deletes the mirror row (<code>state=deleted</code>, <code>deleted_at</code>), writes history + <code>delete</code> access log.</td></tr>
+    <tr><td><code>delete_all_memories</code></td><td><code>()</code></td><td>Soft-deletes every ACL-accessible memory for the user; <code>delete_all</code> access logs.</td></tr>
+  </tbody>
+</table>
+<aside class="callout insight"><strong>search bypasses the engine's <code>search()</code></strong> Unlike the other tools, <code>search_memory</code> does not call <code>memory_client.search()</code>. It manually embeds the query and hits <code>vector_store.search()</code> directly — sidestepping the engine's reranking / score-fusion / <a href="memory-algorithm.html">retrieval pipeline</a> entirely. This keeps the MCP path lean (one embedding + one vector query) but means MCP search results are raw vector hits, not the engine's fused ranking. The result shape is hand-built from <code>OutputData</code> (<code>id, memory, hash, created_at, updated_at, score</code>).</aside>
+
+<h3>Per-request user / client context</h3>
+<p>The user id and client name are not parameters — they are carried in <code>contextvars.ContextVar</code> objects (<code>user_id_var</code>, <code>client_name_var</code>) set from the URL path before the MCP server runs, and reset in a <code>finally</code> block. Every tool reads them via <code>.get(None)</code> and errors if missing. This is how a stateless MCP transport injects identity into the tool body.</p>
+
+<h3>Two transports</h3>
+<dl>
+  <dt>SSE (legacy)</dt>
+  <dd><code>GET /mcp/{client_name}/sse/{user_id}</code> opens an <code>SseServerTransport</code> session; messages POST to <code>/mcp/messages/</code>. Reaches into <code>request._send</code> (the raw ASGI send) because Starlette does not expose it — the documented MCP-SDK pattern.</dd>
+  <dt>Streamable HTTP (current, MCP spec 2025-03-26+)</dt>
+  <dd><code>POST|GET|DELETE /mcp/{client_name}/http/{user_id}</code> runs a <code>StreamableHTTPServerTransport</code> in <strong>stateless</strong> JSON mode (one request = one independent invocation, no persistent session). The handler intercepts the transport's ASGI <code>send</code> via a <code>capture_send</code> closure and re-emits it as a single FastAPI <code>Response</code> — a workaround for the "double-response" bug that would otherwise occur when both the transport and FastAPI try to write.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Resilient (lazy) client init</strong> The memory client is never created at import — <code>get_memory_client_safe()</code> wraps <code>get_memory_client()</code> in a try/except and returns <code>None</code> on failure. Every tool checks for <code>None</code> and returns a human-readable "Memory system is currently unavailable" string rather than raising. This keeps the MCP server alive even when Ollama / the LLM provider is down (degraded "database-only" mode). The dashboard's default port is <code>8765</code> for the MCP base URL.</aside>
+</section>
+
+<section id="rest-api">
+<h2>REST API surface</h2>
+<p>All REST routes live under <code>/api/v1</code> and are consumed by the dashboard. None require auth; <code>user_id</code> is passed as a query/body string on most endpoints. Routers are in <code>api/app/routers/</code>.</p>
+
+<h3>Memories — <code>/api/v1/memories</code></h3>
+<table>
+  <thead><tr><th>Method + path</th><th>Purpose</th></tr></thead>
+  <tbody>
+    <tr><td><code>GET /</code></td><td>Paginated list (filter by app, date range, categories, full-text <code>ilike</code> search, sort). Excludes <code>deleted</code>/<code>archived</code>; ACL-filtered per row.</td></tr>
+    <tr><td><code>POST /</code></td><td>Create memory via <code>memory_client.add(...)</code>, reconcile <code>ADD</code> events into mirror rows reusing the Qdrant UUID.</td></tr>
+    <tr><td><code>POST /filter</code></td><td>Rich POST-body filtering (app ids, category ids, date range, <code>show_archived</code>, sort) — the dashboard's main list query.</td></tr>
+    <tr><td><code>GET /categories</code></td><td>Distinct categories across the user's non-deleted memories.</td></tr>
+    <tr><td><code>GET /{memory_id}</code></td><td>Single memory detail.</td></tr>
+    <tr><td><code>PUT /{memory_id}</code></td><td>Edit memory content (mirror only).</td></tr>
+    <tr><td><code>DELETE /</code></td><td>Bulk delete: removes from vector store then soft-deletes mirror rows.</td></tr>
+    <tr><td><code>POST /actions/archive</code></td><td>Set state → <code>archived</code>.</td></tr>
+    <tr><td><code>POST /actions/pause</code></td><td>Pause memories (global, per-app, per-id, or per-category) → state <code>paused</code>.</td></tr>
+    <tr><td><code>GET /{memory_id}/access-log</code></td><td>Paginated access-log history for a memory.</td></tr>
+    <tr><td><code>GET /{memory_id}/related</code></td><td>Category-overlap "related memories" (page size forced to 5).</td></tr>
+  </tbody>
+</table>
+
+<h3>Apps — <code>/api/v1/apps</code></h3>
+<ul>
+  <li><code>GET /</code> — list apps with <code>total_memories_created</code> + <code>total_memories_accessed</code> (computed via subquery joins on <code>memory_access_logs</code>).</li>
+  <li><code>GET /{app_id}</code>, <code>GET /{app_id}/memories</code>, <code>GET /{app_id}/accessed</code> — app detail, created memories, accessed memories.</li>
+  <li><code>PUT /{app_id}?is_active=...</code> — pause/resume an app. A paused app blocks <code>add_memories</code> and is excluded from ACL checks.</li>
+</ul>
+
+<h3>Config, stats, backup</h3>
+<ul>
+  <li><code>/api/v1/config</code> — get/update the runtime mem0 + openmemory config (see <a href="#config">below</a>).</li>
+  <li><code>/api/v1/stats</code> — <code>GET /</code> returns <code>total_memories</code>, <code>total_apps</code>, and the app list for the dashboard header.</li>
+  <li><code>/api/v1/backup</code> — <code>POST /export</code> streams a zip (<code>memories.json</code> relational dump + <code>memories.jsonl.gz</code> provider-agnostic logical dump); <code>POST /import</code> ingests it with <code>skip</code>/<code>overwrite</code> modes and re-embeds content into the vector store via <code>memory_client.embedding_model.embed(content,"add")</code>.</li>
+</ul>
+<aside class="callout gotcha"><strong><code>PUT /api/v1/config/</code> is a no-op</strong> In <code>api/app/routers/config.py</code>, <code>update_configuration()</code> builds <code>updated_config</code> but never calls <code>save_config_to_db()</code> and falls off the end returning <code>None</code> — the change is silently discarded. The working path is <code>PATCH /</code> (deep-merge + save + <code>reset_memory_client()</code>) and the granular setters <code>PUT /mem0/llm</code>, <code>/mem0/embedder</code>, <code>/mem0/vector_store</code>, <code>/openmemory</code>. The dashboard uses the granular setters, so the bug is rarely hit in practice.</aside>
+<aside class="callout insight"><strong>Backup is portable across vector stores</strong> The <code>memories.jsonl.gz</code> dump stores only content + metadata + categories — no vectors. Import re-embeds with the <em>current</em> embedder, so a backup taken on OpenAI embeddings can be restored onto Ollama/any other provider and any <a href="vector-stores.html">vector store</a>. Cross-user UUID collisions are handled by minting a fresh UUID on import.</aside>
+</section>
+
+<section id="data-model">
+<h2>Relational data model (SQLite mirror)</h2>
+<p>Defined in <code>api/app/models.py</code>. The DB is the source of truth for state, ownership, ACLs, audit, and categories; the vector store is the source of truth for embeddings and semantic search.</p>
+<dl>
+  <dt><code>User</code></dt><dd>Singleton-ish: <code>user_id</code> string (unique), owns apps and memories.</dd>
+  <dt><code>App</code></dt><dd>An MCP client / source app (e.g. <code>cursor</code>, <code>claude</code>). <code>is_active</code> gates writes and reads. Unique on <code>(owner_id, name)</code> — see the <a href="#alembic">migration note</a>.</dd>
+  <dt><code>Memory</code></dt><dd>The mirror row. UUID matches the Qdrant id. <code>state</code> ∈ <code>MemoryState{active, paused, archived, deleted}</code>; carries <code>archived_at</code>/<code>deleted_at</code> soft-delete timestamps. Composite indexes on <code>(user_id,state)</code>, <code>(app_id,state)</code>, <code>(user_id,app_id)</code>.</dd>
+  <dt><code>Category</code> + <code>memory_categories</code></dt><dd>Many-to-many; categories are auto-assigned (see <a href="#categorization">categorization</a>).</dd>
+  <dt><code>MemoryStatusHistory</code></dt><dd>Append-only audit of every state transition (<code>old_state</code>→<code>new_state</code>, <code>changed_by</code>).</dd>
+  <dt><code>MemoryAccessLog</code></dt><dd>Every <code>search</code>/<code>list</code>/<code>delete</code>/<code>delete_all</code> touch, with JSON metadata (query, score, hash). Powers the dashboard's access timeline and per-app access counts.</dd>
+  <dt><code>AccessControl</code></dt><dd>The ACL table: <code>(subject_type, subject_id, object_type, object_id, effect)</code>. Used for app→memory allow/deny rules.</dd>
+  <dt><code>ArchivePolicy</code></dt><dd>Defined (<code>days_to_archive</code> by criteria) but no router currently enforces it — schema-only scaffolding.</dd>
+  <dt><code>Config</code></dt><dd>Single-row-per-key JSON config store (key <code>"main"</code>); the runtime mem0 config is read from here.</dd>
+</dl>
+
+<h3>The ACL: <code>check_memory_access_permissions</code></h3>
+<p><code>api/app/utils/permissions.py</code> centralises read access. A memory is accessible iff: (1) <code>state == active</code>, (2) the app exists and <code>is_active</code>, and (3) the app-level ACL allows it. <code>get_accessible_memory_ids()</code> in <code>memories.py</code> resolves allow/deny rules: no rules → all allowed (<code>None</code>); a blanket deny → empty set; otherwise allowed-minus-denied. This function is invoked per-row in list/search transformers and in every MCP tool.</p>
+
+<details>
+<summary>Deep dive: ID sharing between Qdrant and SQLite</summary>
+<p>When <code>memory_client.add()</code> returns <code>{"results":[{"id","memory","event"}]}</code>, both the MCP <code>add_memories</code> tool and the REST <code>POST /memories</code> handler parse the engine-minted UUID and create the <code>Memory</code> row with that <em>exact</em> id (<code>Memory(id=uuid.UUID(result['id']), ...)</code>). This is what lets the dashboard's relational queries line up with vector-store deletes/searches by id. <code>ADD</code> events upsert the mirror row to <code>active</code>; <code>DELETE</code> events (the engine's update logic can delete superseded memories) soft-delete it.</p>
+</details>
+</section>
+
+<section id="categorization">
+<h2>Auto-categorization (SQLAlchemy event hooks)</h2>
+<p>Memories are categorized automatically on insert/update via SQLAlchemy ORM events, not in the request handler.</p>
+<ul>
+  <li><code>@event.listens_for(Memory, 'after_insert')</code> and <code>'after_update'</code> in <code>models.py</code> call <code>categorize_memory()</code>.</li>
+  <li><code>get_categories_for_memory()</code> in <code>api/app/utils/categorization.py</code> calls OpenAI <code>gpt-4o-mini</code> with <code>response_format=MemoryCategories</code> (structured parse) and the taxonomy in <code>api/app/utils/prompts.py</code> (<code>MEMORY_CATEGORIZATION_PROMPT</code>, ~20 categories: Personal, Work, Health, Finance, …, and free-form new ones). Wrapped in <code>tenacity</code> retry (3 attempts, exponential backoff).</li>
+</ul>
+<aside class="callout gotcha"><strong>Categorization is hard-wired to OpenAI</strong> <code>categorization.py</code> instantiates a bare <code>OpenAI()</code> client at import. Regardless of the configured LLM provider (Ollama, Anthropic, …), categorization always calls OpenAI <code>gpt-4o-mini</code> and needs <code>OPENAI_API_KEY</code>. The event listener opens its own <code>Session(bind=connection)</code> inside the flush, so a categorization failure is caught and rolled back independently of the main transaction.</aside>
+</section>
+
+<section id="config">
+<h2>Configuration &amp; provider auto-detection</h2>
+<p>The mem0 engine config is assembled in <code>api/app/utils/memory.py</code> (<code>get_memory_client()</code>): start from <code>get_default_memory_config()</code> (env-driven), overlay any DB-stored <code>mem0</code> block, substitute <code>env:VAR</code> tokens, then <code>Memory.from_config()</code>. The client is cached globally and only rebuilt when an MD5 of the config changes (<code>_get_config_hash</code>); <code>reset_memory_client()</code> forces a rebuild after config writes.</p>
+
+<h3>Vector store auto-detection</h3>
+<p><code>get_default_memory_config()</code> picks the vector store by inspecting env vars, in order: Chroma → Qdrant → Weaviate → Redis → pgvector → Milvus → Elasticsearch → OpenSearch → FAISS, defaulting to <strong>Qdrant</strong> (<code>host="mem0_store"</code>, <code>port=6333</code>) if none are set. Each provider has a matching one-file Compose fragment under <code>openmemory/compose/</code> (<code>qdrant.yml</code>, <code>chroma.yml</code>, <code>pgvector.yml</code>, <code>milvus.yml</code>, <code>weaviate.yml</code>, <code>redis.yml</code>, <code>elasticsearch.yml</code>, <code>opensearch.yml</code>, <code>faiss.yml</code>) that <code>run.sh</code> merges into the stack. See the <a href="vector-stores.html">vector stores</a> layer for the underlying drivers.</p>
+
+<h3>LLM / embedder provider factories</h3>
+<p>Tiny per-provider config factories (<code>_LLM_CONFIG_FACTORIES</code>, <code>_EMBEDDER_CONFIG_FACTORIES</code>) handle <code>ollama</code> and <code>openai</code> specially; any other provider (anthropic, groq, together, deepseek, …) falls through a generic branch that <em>requires</em> <code>LLM_MODEL</code>/<code>EMBEDDER_MODEL</code> to be set. Defaults: <code>openai/gpt-4o-mini</code> LLM, <code>openai/text-embedding-3-small</code> embedder. This mirrors the broader <a href="config-system.html">config system</a> and <a href="llms.html">LLM</a>/<a href="embeddings.html">embedding</a> provider layers, but is a lighter, OpenMemory-local re-implementation rather than reuse.</p>
+<aside class="callout insight"><strong>Docker→host Ollama URL rewriting</strong> <code>_get_docker_host_url()</code> / <code>_fix_ollama_urls()</code> detect a container (<code>/.dockerenv</code>) and rewrite <code>localhost</code>/<code>127.0.0.1</code> Ollama URLs to <code>host.docker.internal</code> (Mac/Windows) or the bridge gateway (<code>/proc/net/route</code> parse, fallback <code>172.17.0.1</code> on Linux), honouring <code>OLLAMA_HOST</code> first. Without this, a containerized API could never reach an Ollama daemon on the host.</aside>
+<details>
+<summary>Deep dive: where config lives</summary>
+<p>There are three config surfaces: (1) <code>api/.env</code> env vars (the primary install-time knobs, see <code>api/.env.example</code>); (2) the <code>configs</code> table row keyed <code>"main"</code>, edited via the dashboard Settings page and <code>/api/v1/config</code>, holding a <code>{openmemory:{custom_instructions}, mem0:{llm,embedder,vector_store}}</code> JSON; (3) <code>api/default_config.json</code> / <code>config.json</code> static defaults. The DB block overrides env defaults at client-build time. <code>custom_instructions</code> become the engine's <code>custom_fact_extraction_prompt</code>, letting users steer what <a href="memory-algorithm.html">fact extraction</a> stores.</p>
+</details>
+</section>
+
+<section id="alembic">
+<h2>Alembic migration chain</h2>
+<p>Migrations live in <code>api/alembic/versions/</code>. <code>api/alembic/env.py</code> points <code>target_metadata = Base.metadata</code> and reads <code>DATABASE_URL</code> (default <code>sqlite:///./openmemory.db</code>). There are exactly three revisions, applied with <code>make migrate</code> → <code>alembic upgrade head</code> (also <code>make upgrade</code>; <code>make downgrade</code> steps back one). Migrations are <strong>not</strong> run automatically on container start.</p>
+<table>
+  <thead><tr><th>Order</th><th>Revision</th><th>down_revision</th><th>What it does</th></tr></thead>
+  <tbody>
+    <tr><td>1</td><td><code>0b53c747049a</code> (initial)</td><td><code>None</code></td><td>Creates all base tables: users, apps, memories, categories, memory_categories, access_controls, archive_policies, memory_status_history, memory_access_logs (+ indexes).</td></tr>
+    <tr><td>2</td><td><code>add_config_table</code></td><td><code>0b53c747049a</code></td><td>Creates the <code>configs</code> table + <code>idx_configs_key</code> index.</td></tr>
+    <tr><td>3</td><td><code>afd00efbd06b</code> (head)</td><td><code>add_config_table</code></td><td>Drops the global-unique index on <code>apps.name</code>, replaces it with a <em>composite</em> unique <code>idx_app_owner_name</code> on <code>(owner_id, name)</code> — so two users can each have an app named "cursor".</td></tr>
+  </tbody>
+</table>
+<aside class="callout gotcha"><strong>DO NOT edit migrations without understanding the chain</strong> The chain is linear and ordered by <code>down_revision</code>, <strong>not</strong> by the <code>Create Date</code> in the docstring. <code>add_config_table</code> carries a misleading <code>Create Date: 2023-06-01</code> even though it depends on the 2025 initial migration — trust <code>down_revision</code>, never the timestamp. Editing an already-applied migration in place will desync the <code>alembic_version</code> row from real databases and can corrupt upgrades; the correct workflow is always a <em>new</em> revision appended to <code>head</code>. Note also the schema is created two ways (<a href="#application-bootstrap">create_all</a> on boot vs. these migrations), so a model change must be reflected in <em>both</em> the ORM models and a new migration to stay consistent across fresh and upgraded installs.</aside>
+</section>
+
+<section id="ui">
+<h2>Next.js dashboard (ui/)</h2>
+<p>A Next.js <strong>15</strong> / React <strong>19</strong> App Router dashboard (TypeScript, Tailwind, Radix/shadcn-ui, Redux Toolkit), served on port <code>3000</code>. Talks to the API over <code>axios</code> against <code>NEXT_PUBLIC_API_URL</code> (default <code>http://localhost:8765</code>) with user id from <code>NEXT_PUBLIC_USER_ID</code>.</p>
+
+<h3>Routes (App Router pages)</h3>
+<dl>
+  <dt><code>/</code> (<code>app/page.tsx</code>)</dt><dd>Dashboard home: stats, install instructions, charts.</dd>
+  <dt><code>/memories</code></dt><dd>Filterable, paginated memory table (the <code>POST /filter</code> consumer).</dd>
+  <dt><code>/memory/[id]</code></dt><dd>Memory detail: content, categories, access log, related memories, actions.</dd>
+  <dt><code>/apps</code> &amp; <code>/apps/[appId]</code></dt><dd>App grid and per-app memory/access views.</dd>
+  <dt><code>/settings</code></dt><dd>Edits the <code>configs</code> row (LLM/embedder/vector-store + custom instructions) via the granular <code>/api/v1/config</code> setters.</dd>
+</dl>
+
+<h3>State: Redux Toolkit store</h3>
+<p><code>ui/store/store.ts</code> combines six slices: <code>memories</code>, <code>profile</code>, <code>apps</code>, <code>ui</code>, <code>filters</code>, <code>config</code>. Data fetching is in custom hooks (<code>useMemoriesApi</code>, <code>useAppsApi</code>, <code>useStats</code>, <code>useConfig</code>, <code>useFiltersApi</code>) that call axios and dispatch slice actions. The <code>profile</code> slice seeds <code>userId</code> from <code>NEXT_PUBLIC_USER_ID</code>. The <code>Navbar</code> auto-refetches based on the current route via a regex→fetchers mapping.</p>
+<aside class="callout gotcha"><strong>Runtime env-var substitution in a static build</strong> <code>ui/Dockerfile</code> builds Next.js with <em>placeholder</em> <code>NEXT_PUBLIC_*</code> strings; <code>ui/entrypoint.sh</code> then <code>sed</code>-replaces those placeholders in the prebuilt <code>.next/</code> bundle at container start. This is how one prebuilt image (<code>mem0/openmemory-ui</code>) is re-pointed at a different API URL / user id without rebuilding — but it means changing <code>NEXT_PUBLIC_API_URL</code> requires a container restart, not just a page reload.</aside>
+</section>
+
+<section id="deploy">
+<h2>Deployment</h2>
+<p><code>openmemory/docker-compose.yml</code> defines three services: <code>mem0_store</code> (Qdrant, <code>:6333</code>, volume <code>mem0_storage</code>), <code>openmemory-mcp</code> (the API/MCP image, <code>:8765</code>, <code>uvicorn main:app --reload --workers 4</code>, env from <code>api/.env</code> + <code>USER</code>/<code>API_KEY</code>), and <code>openmemory-ui</code> (<code>:3000</code>). The one-line installer <code>run.sh</code> requires <code>OPENAI_API_KEY</code>, finds a free frontend port (3000–3010), selects the vector store (<code>--vector-store=</code> / <code>VECTOR_STORE</code> env, default qdrant), and merges the matching <code>compose/*.yml</code> fragment.</p>
+<ul>
+  <li>API image: <code>python:3.12-slim</code>, deps from <code>api/requirements.txt</code> (pins <code>mem0ai&gt;=0.1.92</code>, <code>mcp[cli]&gt;=1.25.4</code>, <code>fastapi-pagination</code>, <code>anthropic</code>, <code>ollama</code>).</li>
+  <li><code>make</code> targets: <code>up</code>/<code>down</code>/<code>logs</code>/<code>shell</code>/<code>migrate</code>/<code>test</code>/<code>ui-dev</code>. <code>make down</code> also deletes <code>api/openmemory.db</code>.</li>
+  <li>Backup helper: <code>backup-scripts/export_openmemory.sh</code> wraps the <code>/api/v1/backup/export</code> endpoint.</li>
+</ul>
+<aside class="callout security"><strong>No auth, open CORS — keep it local</strong> OpenMemory ships with <code>allow_origins=["*"]</code>, no API keys, and a single implicit user. It is intended to run on <code>localhost</code> behind your own machine, not exposed to a network. For a multi-tenant, authenticated deployment use the <a href="server.html">self-hosted server</a> instead. MCP clients connect by URL path identity only (<code>/mcp/{client_name}/...{user_id}</code>), which is trivially spoofable — acceptable for a single-user local tool, not for shared hosting.</aside>
+</section>
+
+<section id="ecosystem">
+<h2>Where it fits</h2>
+<p>OpenMemory is the platform that the broader mem0 <a href="integrations.html">integrations &amp; ecosystem</a> (the <code>mem0-plugin</code> MCP client, editor extensions) connect <em>to</em>. It consumes the OSS <a href="memory-engine.html">Memory engine</a> directly (not the hosted <a href="client-sdk.html">client SDK</a>), shares the same provider plumbing described in the <a href="architecture.html">architecture overview</a>, and its MCP search deliberately shortcuts the full retrieval <a href="data-flow.html">data flow</a>. For the cross-cutting gotchas surfaced here (the config PUT no-op, dual schema ownership, OpenAI-only categorization), see <a href="surprises.html">surprises &amp; gotchas</a>.</p>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li><a href="memory-engine.html">Memory Engine</a></li><li><a href="vector-stores.html">Vector Stores</a></li><li><a href="config-system.html">Configuration System</a></li><li><a href="llms.html">LLM Providers</a></li><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="memory-algorithm.html">Memory Algorithm</a></li></ul></div><div><h4>Used by</h4><ul><li><a href="integrations.html">Integrations &amp; Ecosystem</a></li></ul></div><div><h4>Related</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="client-sdk.html">Hosted Client &amp; Proxy</a></li><li><a href="data-flow.html">Data Flow</a></li><li><a href="graph-memory.html">Graph Memory (deprecated)</a></li><li><a href="server.html">Self-Hosted Server</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li></ul></div><div><h4>Source files</h4><ul><li><code>openmemory/api/main.py</code> — FastAPI app bootstrap: create_all at import, seed user/app, mount MCP router + 5 REST routers, add_pagination</li><li><code>openmemory/api/app/mcp_server.py</code> — MCP server: 5 memory tools, contextvar identity, SSE + stateless Streamable HTTP transports, lazy client</li><li><code>openmemory/api/app/models.py</code> — SQLite relational mirror schema; after_insert/after_update categorization listeners</li><li><code>openmemory/api/app/utils/memory.py</code> — Config assembly, vector-store/LLM/embedder auto-detection, MD5 cache, Docker-&gt;host Ollama URL rewrite</li><li><code>openmemory/api/app/routers/memories.py</code> — Primary REST surface and ACL resolution</li><li><code>openmemory/api/app/routers/config.py</code> — Config CRUD; PUT / never saves, PATCH and granular setters do</li><li><code>openmemory/api/app/routers/backup.py</code> — Provider-agnostic zip export (relational + jsonl.gz) and re-embedding import</li><li><code>openmemory/api/app/utils/permissions.py</code> — Central read-access ACL check (state + app active + allow/deny rules)</li><li><code>openmemory/api/app/utils/categorization.py</code> — OpenAI gpt-4o-mini structured categorization with tenacity retry</li><li><code>openmemory/api/alembic/versions/</code> — Linear migration chain; ordered by down_revision, not Create Date</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

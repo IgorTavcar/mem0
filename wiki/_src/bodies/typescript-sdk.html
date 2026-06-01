@@ -1,0 +1,245 @@
+<h1>TypeScript SDK</h1>
+<p class="lead">The <code>mem0ai</code> npm package ships two independent surfaces from one repo (<code>mem0-ts/</code>): a thin hosted-platform client (<code>import { MemoryClient } from "mem0ai"</code>) and a full self-contained OSS memory engine (<code>import { Memory } from "mem0ai/oss"</code>). The OSS side is a faithful port of the Python <a href="memory-engine.html">Memory engine</a> — same config-driven provider factories, same April-2026 single-pass additive extraction <a href="memory-algorithm.html">algorithm</a>, same entity-linking retrieval — built dual-format (CJS + ESM) with tsup and tested with Jest. The most consequential divergences from Python: the TS SDK has <strong>no async/await-duplicated <code>AsyncMemory</code> classes</strong> (everything is already promise-based), <strong>no LLM proxy wrapper</strong>, and <strong>no graph-memory store</strong> on the OSS side.</p>
+
+<section id="layout">
+<h2>Package layout &amp; two surfaces</h2>
+<p>One npm package, two entry points wired through the <code>exports</code> map in <code>mem0-ts/package.json</code>.</p>
+<dl>
+  <dt><code>"."</code> → <code>src/client/index.ts</code></dt>
+  <dd>The hosted platform client. Re-exports <code>MemoryClient</code> (also as default), all request/response types, the <code>Feedback</code>/<code>WebhookEvent</code> enums, and the structured exception classes from <code>src/common/exceptions.ts</code>. This is the surface most users import.</dd>
+  <dt><code>"./oss"</code> → <code>src/oss/src/index.ts</code></dt>
+  <dd>The OSS memory engine. Re-exports the <code>Memory</code> class, all provider classes (LLMs, embedders, vector stores) and their base interfaces, the types, and the four factories. Equivalent to <code>from mem0 import Memory</code> in Python.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Gotcha</strong> The package <em>name</em> is <code>mem0ai</code>, not <code>mem0-ts</code>. The OSS <code>README.md</code> still shows <code>import { Memory } from "mem0-ts"</code> and a stale <code>memory.add("text", "user123")</code> positional signature — both are out of date. The real OSS import is <code>mem0ai/oss</code> and <code>add()</code> takes <code>(messages, { userId })</code>. Trust the code, not that README.</aside>
+<p>Two additional source areas sit alongside:</p>
+<ul>
+  <li><code>src/common/</code> — shared <code>exceptions.ts</code> (the structured error hierarchy used by both the client and the OSS engine via re-export).</li>
+  <li><code>src/community/</code> — a <em>separately published</em> package <code>@mem0/community</code> (own <code>package.json</code>, version <code>0.0.1</code>) holding the LangChain integration (<code>src/community/src/integrations/langchain/</code>). It is marked <code>external</code> in the main tsup config so it is never bundled into <code>mem0ai</code>.</li>
+</ul>
+<details>
+<summary>Deep dive: directory map</summary>
+<pre><code class="language-bash">mem0-ts/
+  package.json            # name: "mem0ai", exports "." and "./oss"
+  tsup.config.ts          # two entries → dist/ and dist/oss/
+  jest.config.js          # unit tests (ts-jest)
+  jest.integration.config.js
+  src/
+    client/               # hosted MemoryClient + telemetry + config
+      mem0.ts             # MemoryClient class (REST over axios/fetch)
+      mem0.types.ts       # request/response interfaces, enums
+      index.ts            # public client entry
+    common/exceptions.ts  # MemoryError hierarchy + HTTP mapping
+    community/            # @mem0/community (LangChain) — separate pkg
+    oss/src/
+      index.ts            # public OSS entry
+      memory/index.ts     # Memory class (the engine)
+      llms/  embeddings/  vector_stores/  storage/
+      prompts/  utils/    config/  types/</code></pre>
+</details>
+</section>
+
+<section id="hosted-client">
+<h2>Hosted client — <code>MemoryClient</code></h2>
+<p>A thin REST wrapper around the mem0 platform (<code>https://api.mem0.ai</code> by default), defined as the default export of <code>src/client/mem0.ts</code>. Mirrors the Python <a href="client-sdk.html">hosted client</a>.</p>
+<h3>Construction &amp; auth</h3>
+<ul>
+  <li>Constructor takes <code>{ apiKey, host? }</code>; sends <code>Authorization: Token &lt;apiKey&gt;</code>. An <code>axios</code> instance (60s timeout) is created for a couple of calls, but most requests go through a private <code>_fetchWithErrorHandling()</code> that uses the global <code>fetch</code>.</li>
+  <li>The constructor fires <code>_initializeClient()</code> which calls <code>ping()</code> (<code>GET /v1/ping/</code>) to validate the key and learn <code>orgId</code>/<code>projectId</code>/<code>userEmail</code>. Every public method lazily re-pings if <code>telemetryId</code> is still empty.</li>
+</ul>
+<aside class="callout perf"><strong>Perf / case translation</strong> All outbound payloads pass through <code>camelToSnakeKeys()</code> and all responses through <code>snakeToCamelKeys()</code> (<code>src/client/utils.ts</code>). TS users write camelCase (<code>userId</code>, <code>pageSize</code>, <code>latestOnly</code>) and the wire stays snake_case. <code>camelToSnake()</code> deliberately skips all-uppercase keys so logical operators <code>AND</code>/<code>OR</code>/<code>NOT</code> survive untouched.</aside>
+<h3>Method surface</h3>
+<p>The client speaks a mix of API versions — note <code>add</code>/<code>getAll</code>/<code>search</code> target <strong>v3</strong> while CRUD targets v1:</p>
+<table>
+  <thead><tr><th>Method</th><th>HTTP</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td><code>add(messages, opts)</code></td><td><code>POST /v3/memories/add/</code></td><td>opts merged + snake-cased into payload</td></tr>
+    <tr><td><code>search(query, opts)</code></td><td><code>POST /v3/memories/search/</code></td><td>forces <code>output_format: "v1.1"</code>; supports <code>latestOnly</code>, <code>rerank</code>, <code>threshold</code>, <code>topK</code></td></tr>
+    <tr><td><code>getAll(opts)</code></td><td><code>POST /v3/memories/</code></td><td>page/pageSize as query string; <code>latestOnly</code> supported</td></tr>
+    <tr><td><code>get / update / delete / history</code></td><td><code>/v1/memories/&lt;id&gt;/…</code></td><td><code>delete</code> supports <code>deleteLinked</code></td></tr>
+    <tr><td><code>batchUpdate / batchDelete</code></td><td><code>PUT / DELETE /v1/batch/</code></td><td>up to API-side limit</td></tr>
+    <tr><td><code>users / deleteUsers</code></td><td><code>/v1/entities/</code>, <code>/v2/entities/…</code></td><td><code>deleteUser</code> is <strong>deprecated</strong> (removed in 2.2.0) in favour of <code>deleteUsers</code></td></tr>
+    <tr><td><code>getProject / updateProject</code></td><td><code>/api/v1/orgs/…/projects/…</code></td><td>requires org+project from ping</td></tr>
+    <tr><td><code>getWebhooks / createWebhook / updateWebhook / deleteWebhook</code></td><td><code>/api/v1/webhooks/…</code></td><td>project-scoped</td></tr>
+    <tr><td><code>feedback</code></td><td><code>POST /v1/feedback/</code></td><td><code>Feedback</code> enum</td></tr>
+    <tr><td><code>createMemoryExport / getMemoryExport</code></td><td><code>/v1/exports/…</code></td><td>schema + filters required</td></tr>
+  </tbody>
+</table>
+<aside class="callout decision"><strong>latestOnly &amp; deleteLinked</strong> Both v3-algorithm features are wired on the TS client. <code>latestOnly?: boolean</code> on <code>SearchMemoryOptions</code> and <code>GetAllMemoryOptions</code> flows through <code>camelToSnakeKeys</code> and serializes to <code>latest_only</code> (verified by <code>memoryClient.search.test.ts</code>). <code>deleteLinked?: boolean</code> on <code>DeleteMemoryOptions</code> is the delete-side counterpart — it is <em>off by default</em> and serialized as the <code>delete_linked</code> query param (verified by <code>memoryClient.crud.test.ts</code>); it cascades deletion of the older memories a memory superseded in the v3 linked chain.</aside>
+<aside class="callout gotcha"><strong>Entity params must go in <code>filters</code></strong> Both the client and the OSS engine call <code>rejectTopLevelEntityParams()</code>: passing <code>user_id</code>/<code>agentId</code>/etc. at the top level of <code>search()</code>/<code>getAll()</code> throws. The correct shape is <code>{ filters: { user_id: "u1" } }</code>. (The hosted client checks both snake and camel spellings, including <code>app_id</code>.)</aside>
+</section>
+
+<section id="oss-memory">
+<h2>OSS engine — <code>Memory</code></h2>
+<p>A complete local memory engine in <code>src/oss/src/memory/index.ts</code> — no platform account needed. It owns an embedder, a vector store, an LLM, a history store, and (lazily) an entity store, all created by the four factories from a single config object. This is the TS twin of the Python <a href="memory-engine.html">Memory class</a>.</p>
+<h3>Construction &amp; deferred initialization</h3>
+<ul>
+  <li><code>new Memory(config?)</code> validates &amp; merges via <code>ConfigManager.mergeConfig()</code> against a Zod schema (<code>MemoryConfigSchema</code> in <code>src/oss/src/types/index.ts</code>). Embedder, LLM and history store are created synchronously in the constructor; the <strong>vector store is deferred</strong>.</li>
+  <li>A private <code>_initPromise</code> runs <code>_autoInitialize()</code>: if no <code>dimension</code> was configured, it embeds a probe string (<code>"dimension probe"</code>) to auto-detect the embedding dimension, then constructs and <code>initialize()</code>s the vector store. Every public method first <code>await</code>s <code>_ensureInitialized()</code>.</li>
+  <li><code>static fromConfig(dict)</code> mirrors Python's <code>Memory.from_config</code>.</li>
+</ul>
+<aside class="callout insight"><strong>Insight: init self-heals</strong> <code>_ensureInitialized()</code> stores the first failure in <code>_initError</code> instead of throwing from the constructor, then <em>retries</em> <code>_autoInitialize()</code> on the next method call — so a transiently-down embedder/vector store at startup doesn't permanently brick the instance.</aside>
+<h3>Public methods</h3>
+<dl>
+  <dt><code>add(messages, { userId? | agentId? | runId?, metadata?, infer?, filters? })</code></dt>
+  <dd>Returns <code>{ results: MemoryItem[] }</code>. At least one of userId/agentId/runId is required. Entity IDs are trimmed and validated (no whitespace, non-empty) by <code>validateAndTrimEntityId()</code> and folded into both <code>filters</code> and <code>metadata</code> as snake_case. With <code>infer: false</code> each message is stored verbatim; with <code>infer: true</code> it runs the phased pipeline below.</dd>
+  <dt><code>search(query, { filters, topK?, threshold? })</code></dt>
+  <dd>Multi-signal retrieval (semantic + BM25 keyword + entity boost). Validates <code>threshold ∈ [0,1]</code> and integer <code>topK ≥ 0</code>. Defaults <code>topK = 20</code>, <code>threshold = 0.1</code>.</dd>
+  <dt><code>get / getAll / update / delete / deleteAll / history / reset</code></dt>
+  <dd><code>getAll</code> defaults <code>topK = 20</code>; <code>reset()</code> clears history + drops the vector collection (skipped for the <code>langchain</code> provider) + drops the entity store, then re-initializes.</dd>
+</dl>
+<aside class="callout decision"><strong>No <code>AsyncMemory</code> in TS</strong> Python exposes both a synchronous <code>Memory</code> and an <code>AsyncMemory</code> with duplicated method bodies. TypeScript needs neither: every method on the single <code>Memory</code> class already returns a <code>Promise</code>, so there is exactly one class. This is a structural divergence, not a feature gap.</aside>
+</section>
+
+<section id="add-pipeline">
+<h2>The v3 add() pipeline (algorithm parity)</h2>
+<p>When <code>infer: true</code>, <code>addToVectorStore()</code> runs the same single-pass ADD-only additive extraction the Python side uses — see <a href="memory-algorithm.html">the algorithm page</a> for the full design. The TS implementation is an explicit phased batch pipeline:</p>
+<pre class="mermaid">
+flowchart TD
+  P0[Phase 0: fetch last-K session messages from history] --> P1[Phase 1: embed input, search vector store for ~10 existing memories]
+  P1 --> P2["Phase 2: ONE LLM call — ADDITIVE_EXTRACTION_PROMPT + existing memories (UUIDs masked as integers)"]
+  P2 --> P3[Phase 3: batch-embed extracted memory texts]
+  P3 --> P4[Phase 4-5: md5 hash dedup vs existing + within-batch]
+  P4 --> P6[Phase 6: batch insert vectors + batch history ADD]
+  P6 --> P7[Phase 7: batch entity extraction + linking into entity store]
+  P7 --> P8[Phase 8: persist raw messages]
+</pre>
+<ul>
+  <li><strong>Prompt parity:</strong> <code>ADDITIVE_EXTRACTION_PROMPT</code> in <code>src/oss/src/prompts/index.ts</code> is explicitly commented <em>"Ported from mem0/configs/prompts.py"</em>; an <code>AGENT_CONTEXT_SUFFIX</code> is appended when the call is agent-scoped (<code>agent_id</code> set, no <code>user_id</code>).</li>
+  <li><strong>Anti-hallucination:</strong> existing memory UUIDs are replaced with integer indices in a <code>uuidMapping</code> before being shown to the LLM, exactly as Python does.</li>
+  <li><strong>Single LLM call:</strong> the model is asked for <code>{ type: "json_object" }</code>; the response is robustly parsed with <code>extractJson()</code> and validated against <code>AdditiveExtractionSchema</code> (Zod), with a fallback re-extract on parse failure.</li>
+  <li><strong>Dedup:</strong> md5 hash of each extracted text is checked against existing payload hashes and a within-batch <code>seenHashes</code> set; <code>textLemmatized</code> (for BM25) is precomputed on insert.</li>
+  <li><strong>Every phase degrades gracefully:</strong> batch embed/insert/history each fall back to per-item loops on failure; entity linking is wrapped so a failure only warns.</li>
+</ul>
+<aside class="callout insight"><strong>Insight: history store doubles as conversation memory</strong> Phase 0 calls <code>db.getLastMessages(sessionScope, 10)</code> and Phase 8 calls <code>db.saveMessages(...)</code> — capabilities probed with <code>typeof this.db.X === "function"</code>, so a history backend lacking them just skips that context without error.</aside>
+</section>
+
+<section id="search-pipeline">
+<h2>search() — multi-signal retrieval</h2>
+<p>The TS <code>search()</code> reproduces the Python multi-signal fusion (it is <em>not</em> a plain vector search) — see <a href="memory-algorithm.html#multi-signal-retrieval">retrieval</a>:</p>
+<ol>
+  <li><strong>Preprocess</strong> — lemmatize query (<code>lemmatizeForBm25</code>), extract query entities (<code>extractEntities</code>).</li>
+  <li><strong>Semantic</strong> — embed query, over-fetch <code>max(topK*4, 60)</code> from the vector store.</li>
+  <li><strong>Keyword</strong> — if the store implements the optional <code>keywordSearch()</code>, run BM25; raw scores are sigmoid-normalized to [0,1] via <code>normalizeBm25()</code> with query-length-adaptive params from <code>getBm25Params()</code>.</li>
+  <li><strong>Entity boost</strong> — for each (deduped, max 8) query entity, search the entity store; matched entities propagate a spread-attenuated boost (<code>ENTITY_BOOST_WEIGHT = 0.5</code>, attenuated by how many memories the entity links) to every <code>linkedMemoryIds</code>.</li>
+  <li><strong>Fuse &amp; rank</strong> — <code>scoreAndRank()</code> (<code>src/oss/src/utils/scoring.ts</code>) combines semantic + BM25 + entity boost, applies the threshold against the dynamic max-possible score, and truncates to <code>topK</code>.</li>
+</ol>
+<aside class="callout gotcha"><strong>Filter normalization avoids "undefined" footguns</strong> <code>search()</code>/<code>getAll()</code> trim entity IDs and <em>drop</em> keys whose value resolves to <code>undefined</code>, because otherwise Qdrant rejects the malformed match, pgvector binds NULL, and Redis emits a literal <code>"undefined"</code> string in TAG filters. The engine also supports advanced operators (<code>eq/ne/gt/gte/lt/lte/in/nin/contains/icontains</code> and <code>AND/OR/NOT</code>) via <code>_processMetadataFilters()</code>, translating <code>OR</code>→<code>$or</code> and <code>NOT</code>→<code>$not</code>.</aside>
+</section>
+
+<section id="entity-linking">
+<h2>Entity store (the graph replacement)</h2>
+<p>There is <strong>no graph database, no Neo4j/Memgraph, no graph provider</strong> in the OSS TS engine. The directory <code>src/oss/src/</code> has no <code>graphs/</code> subdir; the only occurrences of the word "graph" are a conceptual mention in a prompt example and one LLM test. Relationship awareness instead comes from a lightweight <strong>entity store</strong>, matching the Python OSS direction documented on <a href="graph-memory.html">the graph-memory page</a>.</p>
+<dl>
+  <dt>Lazy second collection</dt>
+  <dd><code>getEntityStore()</code> creates a <code>&lt;collectionName&gt;_entities</code> collection on first use, reusing the same vector-store provider/config. For the file-based <code>memory</code> provider it forces a separate <code>*_entities.db</code> file.</dd>
+  <dt>Entity records</dt>
+  <dd>Each record stores <code>{ data, entityType, linkedMemoryIds: string[], user_id?/agent_id?/run_id? }</code>. On <code>add</code>, entities are extracted in batch, globally deduped by lowercased text, batch-embedded, and either merged into an existing entity (cosine ≥ 0.95) or inserted new.</dd>
+  <dt>Lifecycle cleanup</dt>
+  <dd><code>update()</code> strips the old memory's id from entities then re-links from the new text; <code>delete()</code> removes the id from all linked entities, deleting the entity record entirely once its <code>linkedMemoryIds</code> empties.</dd>
+</dl>
+<aside class="callout insight"><strong>Insight: NLP extraction with graceful fallback</strong> Entity extraction (<code>src/oss/src/utils/entity_extraction.ts</code>) uses the <code>compromise</code> NLP package (a peer dependency) for noun-phrase extraction, but <em>dynamically requires</em> it and falls back to a pure-regex extractor if it isn't installed — so the engine still runs without the optional NLP deps.</aside>
+</section>
+
+<section id="providers">
+<h2>Exported providers</h2>
+<p>The OSS index re-exports every provider class. Counts below are the actual implementation files (base interfaces excluded), and every provider is dispatched by name in <code>src/oss/src/utils/factory.ts</code> through one of the four factories (<code>EmbedderFactory</code>, <code>LLMFactory</code>, <code>VectorStoreFactory</code>, <code>HistoryManagerFactory</code>) — the same <a href="config-system.html">config-driven factory pattern</a> as Python.</p>
+<h3>LLM providers — 11</h3>
+<p><code>openai</code>, <code>openai_structured</code>, <code>anthropic</code>, <code>groq</code>, <code>mistral</code>, <code>ollama</code>, <code>lmstudio</code>, <code>google</code> (alias <code>gemini</code>), <code>azure_openai</code>, <code>deepseek</code>, <code>langchain</code>. All implement the <code>LLM</code> interface (<code>src/oss/src/llms/base.ts</code>): <code>generateResponse(messages, response_format?, tools?)</code> and <code>generateChat(messages)</code>. See <a href="llms.html">LLM providers</a>.</p>
+<h3>Embedding providers — 6</h3>
+<p><code>openai</code>, <code>ollama</code>, <code>lmstudio</code>, <code>google</code>/<code>gemini</code>, <code>azure_openai</code>, <code>langchain</code>. The <code>Embedder</code> interface (<code>src/oss/src/embeddings/base.ts</code>) is just <code>embed(text)</code> and <code>embedBatch(texts)</code> — the batch method is what makes the add/search pipelines efficient. See <a href="embeddings.html">embeddings</a>.</p>
+<h3>Vector stores — 8</h3>
+<p><code>memory</code> (in-process, the default), <code>qdrant</code>, <code>redis</code>, <code>supabase</code>, <code>pgvector</code>, <code>azure-ai-search</code>, <code>vectorize</code> (Cloudflare), <code>langchain</code>. All implement the <code>VectorStore</code> interface (<code>src/oss/src/vector_stores/base.ts</code>) — <code>insert/search/get/update/delete/deleteCol/list/initialize</code> plus an <em>optional</em> <code>keywordSearch()</code> (the BM25 hook) and <code>getUserId/setUserId</code> (telemetry). See <a href="vector-stores.html">vector stores</a>.</p>
+<h3>History stores — 3</h3>
+<p><code>sqlite</code> (default, via <code>better-sqlite3</code>; <code>:memory:</code> when no path), <code>supabase</code>, <code>memory</code> (in-process). Plus a <code>DummyHistoryManager</code> used when <code>disableHistory: true</code>.</p>
+<table>
+  <thead><tr><th>Layer</th><th>TS providers (count)</th><th>Notes vs Python</th></tr></thead>
+  <tbody>
+    <tr><td>LLMs</td><td>11</td><td>Subset of Python's larger roster (no Bedrock, Together, vLLM, etc.); includes a dedicated <code>openai_structured</code> and <code>langchain</code> bridge</td></tr>
+    <tr><td>Embeddings</td><td>6</td><td>Subset of Python's</td></tr>
+    <tr><td>Vector stores</td><td>8</td><td>Subset; adds Cloudflare <code>vectorize</code> not present in Python core</td></tr>
+    <tr><td>History stores</td><td>3 (+Dummy)</td><td>Python core uses SQLite; TS adds Supabase + in-memory + Dummy</td></tr>
+    <tr><td>Graph store</td><td>0</td><td>None — entity store instead</td></tr>
+    <tr><td>Rerankers</td><td>0</td><td>OSS TS has no reranker layer; hosted client exposes <code>rerank</code> flag only. See <a href="rerankers.html">rerankers</a></td></tr>
+  </tbody>
+</table>
+</section>
+
+<section id="python-vs-ts">
+<h2>Python vs TypeScript — parity matrix</h2>
+<p>What carries over, what diverges, and what lags.</p>
+<table>
+  <thead><tr><th>Capability</th><th>Python</th><th>TypeScript</th><th>Notes</th></tr></thead>
+  <tbody>
+    <tr><td>Hosted client</td><td><code>MemoryClient</code></td><td><code>MemoryClient</code> (<code>mem0ai</code>)</td><td>Full parity incl. webhooks, exports, feedback, projects</td></tr>
+    <tr><td>Async hosted client</td><td><code>AsyncMemoryClient</code></td><td>—</td><td><strong>Diverges:</strong> TS client is already promise-based; no separate async class</td></tr>
+    <tr><td>LLM proxy wrapper</td><td>proxy / chat-completion wrapper</td><td>—</td><td><strong>Lags:</strong> no proxy module in TS</td></tr>
+    <tr><td>OSS engine</td><td><code>Memory</code> / <code>AsyncMemory</code></td><td><code>Memory</code> (single class)</td><td><strong>Diverges:</strong> one promise-based class covers both</td></tr>
+    <tr><td>v3 additive algorithm</td><td>yes</td><td>yes</td><td>Prompt explicitly ported; same single LLM call, UUID masking, batch phases</td></tr>
+    <tr><td>Entity linking</td><td>entity store</td><td>entity store</td><td>Parity — <code>compromise</code> NLP + regex fallback</td></tr>
+    <tr><td>Graph memory (OSS)</td><td>removed → entity linking</td><td>never present → entity linking</td><td>No graph provider on either OSS core; see <a href="graph-memory.html">graph memory</a></td></tr>
+    <tr><td><code>latestOnly</code> (search/getAll)</td><td>yes</td><td>yes (hosted client)</td><td>Serialized as <code>latest_only</code></td></tr>
+    <tr><td><code>deleteLinked</code> (delete)</td><td>yes</td><td>yes (hosted client)</td><td>Serialized as <code>delete_linked</code>, off by default</td></tr>
+    <tr><td>Structured exceptions</td><td>exception hierarchy</td><td><code>MemoryError</code> hierarchy</td><td>Parity — HTTP-status → exception map in <code>src/common/exceptions.ts</code></td></tr>
+    <tr><td>Provider breadth</td><td>broad</td><td>curated subset</td><td><strong>Lags:</strong> fewer LLM/embed/vector providers; TS-only addition: Cloudflare <code>vectorize</code></td></tr>
+    <tr><td>Rerankers</td><td>reranker layer</td><td>—</td><td><strong>Lags:</strong> no OSS reranker classes in TS</td></tr>
+  </tbody>
+</table>
+<aside class="callout security"><strong>Structured errors are first-class</strong> Both surfaces share <code>src/common/exceptions.ts</code>: <code>createExceptionFromResponse(status, body)</code> maps HTTP codes to typed subclasses (<code>401/403→AuthenticationError</code>, <code>404→MemoryNotFoundError</code>, <code>429→RateLimitError</code>, <code>413→MemoryQuotaExceededError</code>, <code>5xx/408→NetworkError</code>, <code>400/409/422→ValidationError</code>), each carrying an <code>errorCode</code>, a human <code>suggestion</code>, and <code>debugInfo</code>. <code>Object.setPrototypeOf</code> fixes the prototype chain so <code>instanceof</code> works across the transpile boundary.</aside>
+</section>
+
+<section id="build-test">
+<h2>Build &amp; test</h2>
+<h3>tsup — dual CJS + ESM</h3>
+<p>The build is driven by <code>tsup.config.ts</code> (the inline <code>tsup</code> block in <code>package.json</code> is superseded by the config file). Two entries are built:</p>
+<pre><code class="language-typescript">defineConfig([
+  { entry: ["src/client/index.ts"], format: ["cjs", "esm"], dts: true, ... },
+  { entry: ["src/oss/src/index.ts"], outDir: "dist/oss",
+    format: ["cjs", "esm"], dts: true, ... },
+]);</code></pre>
+<ul>
+  <li>Each entry emits <code>.js</code> (CJS), <code>.mjs</code> (ESM), <code>.d.ts</code> types, and sourcemaps — matching the <code>require</code>/<code>import</code>/<code>types</code> conditions in the exports map.</li>
+  <li>The SDK version is injected at build time via a <code>define</code> replacing <code>__MEM0_SDK_VERSION__</code> with the <code>package.json</code> version.</li>
+  <li>All heavy/optional deps (OpenAI, Anthropic, Groq, pg, redis, qdrant, supabase, azure, cloudflare, langchain, <code>better-sqlite3</code>, <code>compromise</code>, <code>natural</code>, …) are marked <code>external</code> so they stay <code>peerDependencies</code> and are never bundled. A dedicated test (<code>tsup-externals.test.ts</code>) guards this.</li>
+  <li><code>build</code> = <code>clean</code> → <code>prettier --check .</code> → <code>tsup</code>: a formatting violation fails the build.</li>
+</ul>
+<aside class="callout perf"><strong>Optional peers, lazy loading</strong> Every provider's heavy client is a peer dependency, and providers import them lazily — so installing <code>mem0ai</code> and using only the in-memory store + OpenAI doesn't pull Qdrant/Redis/pg/etc. <code>better-sqlite3</code> is in <code>pnpm.onlyBuiltDependencies</code> because it has a native build step.</aside>
+<h3>Jest</h3>
+<p>Tests run under <code>ts-jest</code> (Node env) per <code>jest.config.js</code>, rooted at <code>src/</code> and <code>tests/</code>, ignoring <code>node_modules</code>/<code>dist</code>.</p>
+<dl>
+  <dt>Unit tests</dt>
+  <dd>~38 spec files. OSS engine coverage in <code>src/oss/tests/</code> (27 files: per-provider LLM/embedder tests, vector-store compat, pgvector filters, factory, config manager, dimension autodetect, telemetry sampling, tsup externals, JSON extraction) and <code>src/oss/src/tests/</code> (3 SQLite migration/compat/path tests). Hosted client coverage in <code>src/client/tests/</code> (8 files: init, crud, search, batch, project, users, webhooks, telemetry aliasing).</dd>
+  <dt>Integration tests</dt>
+  <dd><code>jest.integration.config.js</code> targets <code>**/integration/**/*.test.ts</code> (5 files under <code>src/client/tests/integration/</code>), runs <strong><code>maxWorkers: 1</code></strong> (serial, to dodge platform rate limits/races), with a global setup/teardown. Invoked via <code>npm run test:integration</code> (with <code>--forceExit</code>).</dd>
+</dl>
+<p>Scripts of note: <code>test</code> (all), <code>test:unit</code> (coverage, excludes integration), <code>test:ci</code> (coverage + CI), <code>test:integration</code>, <code>test:watch</code>.</p>
+</section>
+
+<section id="telemetry-community">
+<h2>Telemetry, config files &amp; community</h2>
+<ul>
+  <li><strong>Telemetry:</strong> both surfaces emit anonymous events (<code>captureClientEvent</code>). The OSS engine resolves a stable anonymous id via <code>getOrCreateMem0UserId()</code> (in <code>src/client/config.ts</code>, shared with the client) persisted in the vector store; the hosted client hashes the API key and, when a real email is known, performs an anon→email alias (<code>_maybeAliasAnonToEmail</code>). Telemetry honors an enable/disable flag and is best-effort (failures only log).</li>
+  <li><strong>Defaults:</strong> <code>DEFAULT_MEMORY_CONFIG</code> (<code>src/oss/src/config/defaults.ts</code>) = OpenAI <code>text-embedding-3-small</code> embeddings, in-memory vector store (dim 1536), OpenAI <code>gpt-5-mini</code> LLM, SQLite history at <code>memory.db</code>, version <code>v1.1</code>.</li>
+  <li><strong>Community (<code>@mem0/community</code>):</strong> a separate package re-exporting only the LangChain integration (<code>src/community/src/integrations/langchain/</code>). It depends on <code>mem0ai</code> and is excluded from the main bundle. See <a href="integrations.html">integrations</a>.</li>
+</ul>
+<aside class="callout gotcha"><strong>Deprecations to watch</strong> (1) <code>MemoryClient.deleteUser()</code> is marked <code>@deprecated</code> (removal in 2.2.0) — use <code>deleteUsers()</code>. (2) The OSS <code>README.md</code> claims "Optional graph-based memory relationships" — stale; the engine uses the entity store, no graph DB. (3) <code>FactRetrievalSchema</code> / <code>getUpdateMemoryMessages</code> / <code>getFactRetrievalMessages</code> remain exported from <code>prompts/index.ts</code> but the live pipeline uses the additive path; the legacy fact-retrieval prompts are vestigial.</aside>
+</section>
+
+<section id="usage">
+<h2>Usage at a glance</h2>
+<pre><code class="language-typescript">// Hosted platform
+import { MemoryClient } from "mem0ai";
+const client = new MemoryClient({ apiKey: process.env.MEM0_API_KEY! });
+await client.add([{ role: "user", content: "I love sci-fi" }],
+                 { userId: "alex" });
+const hits = await client.search("genres?",
+                 { filters: { user_id: "alex" }, latestOnly: true });
+
+// OSS engine (fully local)
+import { Memory } from "mem0ai/oss";
+const memory = new Memory();             // OpenAI defaults
+await memory.add("I prefer window seats", { userId: "alex" });
+const res = await memory.search("seating preference",
+                 { filters: { user_id: "alex" } });
+// res.results: Array&lt;{ id, memory, score, metadata, ... }&gt;</code></pre>
+<p>For the wider picture — the <a href="architecture.html">two usage modes</a>, the <a href="data-flow.html">add/search data flow</a>, and the <a href="config-system.html">config + factory pattern</a> these mirror — see the linked pages. Cross-cutting quirks (stale README, missing async/proxy/graph) are also collected on <a href="surprises.html">surprises</a>.</p>
+</section>

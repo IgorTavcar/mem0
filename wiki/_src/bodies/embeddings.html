@@ -1,0 +1,255 @@
+<h1>Embedding Providers</h1>
+<p class="lead">The embeddings layer turns text into dense vectors for storage and similarity search. Every provider implements a single abstract contract, <code>EmbeddingBase.embed()</code>, and is instantiated by the <code>EmbedderFactory</code> from a declarative config. The layer ships <strong>11 real providers</strong> plus a 10-dimensional <code>MockEmbeddings</code> for tests, defaults to OpenAI <code>text-embedding-3-small</code> (1536 dims), and feeds vectors into the <a href="vector-stores.html">vector store</a> during <a href="memory-algorithm.html">memory extraction and retrieval</a>.</p>
+
+<section id="overview">
+<h2>Overview & role in the system</h2>
+<p>Embeddings sit between raw text and the <a href="vector-stores.html#interface">vector store interface</a>. The <a href="memory-engine.html">Memory engine</a> calls the embedder for every fact it writes and every query it searches.</p>
+<ul>
+<li><strong>Where it lives:</strong> <code>mem0/embeddings/</code> for implementations; <code>mem0/configs/embeddings/base.py</code> for the shared config object.</li>
+<li><strong>Plugin pattern:</strong> like LLMs and vector stores, embedders follow the <a href="architecture.html">provider plugin pattern</a> — one abstract base, many lazily-imported subclasses, wired by string keys through a factory (see <a href="config-system.html#factories">the four factories</a>).</li>
+<li><strong>Single output type:</strong> <code>embed()</code> always returns a flat <code>list[float]</code> (one vector). There is no sparse / multi-vector path in this layer.</li>
+<li><strong>Action awareness:</strong> the optional <code>memory_action</code> argument lets a provider pick a task-specific embedding mode (document vs query). Only Vertex AI currently uses it.</li>
+</ul>
+<aside class="callout insight"><strong>Insight</strong> The embeddings package <code>__init__.py</code> is intentionally <em>empty</em> (0 bytes). Nothing is re-exported at the package level — every provider is loaded by fully-qualified module path through <code>EmbedderFactory</code>, so importing <code>mem0.embeddings</code> never pulls in heavy SDKs like <code>boto3</code>, <code>sentence-transformers</code>, or <code>google-genai</code>.</aside>
+</section>
+
+<section id="base-contract">
+<h2>The EmbeddingBase contract</h2>
+<p>One abstract class in <code>mem0/embeddings/base.py</code> defines the whole layer.</p>
+
+<pre><code class="language-python">class EmbeddingBase(ABC):
+    def __init__(self, config: Optional[BaseEmbedderConfig] = None):
+        self.config = config if config is not None else BaseEmbedderConfig()
+
+    @abstractmethod
+    def embed(self, text, memory_action: Optional[Literal["add", "search", "update"]]):
+        """Return the embedding vector (list[float]) for `text`."""
+
+    def embed_batch(self, texts, memory_action="add"):
+        # Default: call embed() once per text. Override for native batch APIs.
+        return [self.embed(text, memory_action) for text in texts]</code></pre>
+
+<dl>
+<dt><code>config</code></dt><dd>A <code>BaseEmbedderConfig</code> (a plain ABC, not Pydantic). If none is supplied the base constructs an empty default. The factory always passes one in practice.</dd>
+<dt><code>embed(text, memory_action)</code> <em>(abstract)</em></dt><dd>The only required method. <code>memory_action</code> is one of <code>"add"</code>, <code>"search"</code>, <code>"update"</code> (or <code>None</code>). Most providers accept it and ignore it; it exists so providers that distinguish query vs document embeddings can branch.</dd>
+<dt><code>embed_batch(texts, memory_action="add")</code> <em>(concrete default)</em></dt><dd>Convenience batch method. The base implementation simply loops <code>embed()</code> sequentially. Providers with a native batch endpoint override it.</dd>
+</dl>
+
+<aside class="callout gotcha"><strong>Gotcha</strong> The abstract <code>embed()</code> signature declares <code>memory_action</code> as a required positional with no default, but <em>every</em> concrete provider redeclares it with <code>= None</code>. Call sites in the engine always pass an action explicitly (e.g. <code>embed(text, "add")</code>), so the missing base default is never hit in practice — but a custom subclass that copies the base signature literally would break callers that omit the argument.</aside>
+
+<h3>Who overrides embed_batch?</h3>
+<p>Only the two OpenAI-family providers have a native batch implementation; the other nine fall back to the sequential base loop.</p>
+<table>
+<thead><tr><th>Provider</th><th><code>embed_batch</code></th><th>Behaviour</th></tr></thead>
+<tbody>
+<tr><td><code>openai</code></td><td>Native override</td><td>Single API call, auto-chunked into batches of <code>MAX_BATCH = 100</code>; results re-sorted by <code>response.data[*].index</code> to preserve input order.</td></tr>
+<tr><td><code>azure_openai</code></td><td>Native override</td><td>Same chunk-of-100 + index re-sort logic.</td></tr>
+<tr><td>all 9 others</td><td>Inherited</td><td>Sequential <code>embed()</code> per text.</td></tr>
+</tbody>
+</table>
+<aside class="callout perf"><strong>Perf</strong> The OpenAI/Azure batch override re-sorts by <code>x.index</code> before returning. This is load-bearing: the OpenAI embeddings API does not guarantee response ordering matches request ordering, so a naive <code>[d.embedding for d in response.data]</code> could silently misalign vectors with their source texts. The engine uses <code>embed_batch</code> for bulk fact and entity writes (<code>mem0/memory/main.py</code>), so this path matters at scale.</aside>
+</section>
+
+<section id="config">
+<h2>BaseEmbedderConfig & EmbedderConfig</h2>
+<p>There are two distinct config objects — do not confuse them.</p>
+
+<h3>EmbedderConfig (the declarative wrapper)</h3>
+<p><code>mem0/embeddings/configs.py</code> — a Pydantic model that lives inside <code>MemoryConfig.embedder</code> (see <a href="config-system.html">the configuration system</a>).</p>
+<pre><code class="language-python">class EmbedderConfig(BaseModel):
+    provider: str = "openai"          # default provider
+    config: Optional[dict] = {}       # provider-specific kwargs
+
+    @field_validator("config")
+    def validate_config(cls, v, values):
+        provider = values.data.get("provider")
+        if provider in [ "openai", "ollama", "huggingface", "azure_openai",
+                         "gemini", "vertexai", "together", "lmstudio",
+                         "langchain", "aws_bedrock", "fastembed" ]:
+            return v
+        raise ValueError(f"Unsupported embedding provider: {provider}")</code></pre>
+<aside class="callout gotcha"><strong>Gotcha</strong> The validator's allow-list contains exactly the 11 supported providers — and it must be kept in sync by hand with <code>EmbedderFactory.provider_to_class</code> in <code>mem0/utils/factory.py</code>. They currently match, but there is no single source of truth: adding a provider means editing both lists.</aside>
+
+<h3>BaseEmbedderConfig (the runtime config)</h3>
+<p><code>mem0/configs/embeddings/base.py</code> — a plain <code>ABC</code> (not Pydantic) flattening every provider's options into one wide constructor. The <code>dict</code> from <code>EmbedderConfig.config</code> is splatted into it by the factory. Key fields:</p>
+<dl>
+<dt><code>model</code>, <code>api_key</code>, <code>embedding_dims</code></dt><dd>Universal. <code>embedding_dims</code> defaults to <code>None</code> and each provider fills in its own fallback.</dd>
+<dt><code>ollama_base_url</code>, <code>openai_base_url</code>, <code>huggingface_base_url</code>, <code>lmstudio_base_url</code></dt><dd>Per-provider endpoint overrides. <code>lmstudio_base_url</code> defaults to <code>http://localhost:1234/v1</code>.</dd>
+<dt><code>model_kwargs</code></dt><dd>HuggingFace SentenceTransformer / TEI kwargs (defaults to <code>{}</code>).</dd>
+<dt><code>azure_kwargs</code></dt><dd>Coerced into an <code>AzureConfig</code> (api_key, deployment, endpoint, api_version, default_headers).</dd>
+<dt><code>http_client_proxies</code></dt><dd>If set, builds an <code>httpx.Client(proxies=...)</code> exposed as <code>self.http_client</code>.</dd>
+<dt><code>vertex_credentials_json</code>, <code>memory_{add,update,search}_embedding_type</code></dt><dd>Vertex AI: credentials path + per-action task types.</dd>
+<dt><code>output_dimensionality</code></dt><dd>Gemini-specific dimension hint.</dd>
+<dt><code>aws_access_key_id</code>, <code>aws_secret_access_key</code>, <code>aws_region</code></dt><dd>Bedrock. <code>aws_region</code> resolves config → <code>AWS_REGION</code> env → <code>"us-west-2"</code>.</dd>
+</dl>
+<aside class="callout decision"><strong>Decision</strong> <code>BaseEmbedderConfig</code> is a single fat config rather than per-provider subclasses (contrast with LLMs, where <a href="llms.html">provider-specific config classes</a> exist). Every embedder receives the same wide object and reads only the fields it cares about — simpler to wire through the factory, at the cost of one namespace holding unrelated provider knobs.</aside>
+</section>
+
+<section id="dims-flow">
+<h2>Embedding dimensions & the vector store</h2>
+<p>This is the most error-prone seam in the whole config. There are <strong>two separate dimension fields</strong> and they are <strong>not</strong> auto-synced.</p>
+<dl>
+<dt><code>embedder.config.embedding_dims</code></dt><dd>What the embedder produces / requests from the model. Lives on <code>BaseEmbedderConfig</code>.</dd>
+<dt><code>vector_store.config.embedding_model_dims</code></dt><dd>The vector dimension the store's collection/index is created with. Lives on each vector-store config (e.g. <code>mem0/configs/vector_stores/qdrant.py</code>).</dd>
+</dl>
+<p>Both default to <strong>1536</strong> (the <code>text-embedding-3-small</code> size), which is why the OpenAI default "just works". The Memory engine constructs them independently in <code>mem0/memory/main.py</code>:</p>
+<pre><code class="language-python">self.embedding_model = EmbedderFactory.create(
+    self.config.embedder.provider, self.config.embedder.config,
+    self.config.vector_store.config,
+)
+self.vector_store = VectorStoreFactory.create(
+    self.config.vector_store.provider, self.config.vector_store.config,
+)</code></pre>
+<aside class="callout gotcha"><strong>Gotcha — keep dims in sync yourself</strong> Nothing in <code>MemoryConfig</code> copies <code>embedding_dims</code> into <code>embedding_model_dims</code>. If you switch to a non-1536 model (e.g. Gemini's 768, FastEmbed's <code>gte-large</code> 1024, Vertex's 256) you MUST set <code>vector_store.config.embedding_model_dims</code> to match, or the store will create an index of the wrong width and inserts will fail or silently truncate/reject. See <a href="config-system.html">the configuration system</a> and <a href="vector-stores.html">vector stores</a>.</aside>
+<details><summary>Deep dive: how each provider resolves embedding_dims</summary>
+<p>Providers compute their effective dimension at construction time, generally <code>config value → model default</code>:</p>
+<ul>
+<li><strong>OpenAI:</strong> <code>1536</code>. Only passes <code>dimensions</code> to the API when the user explicitly set <code>embedding_dims</code> (tracked via <code>self._pass_dimensions_to_api</code>) — because non-Matryoshka OpenAI-compatible backends (vLLM, Voyage) reject the parameter.</li>
+<li><strong>Azure OpenAI:</strong> never passes <code>dimensions</code>; relies on the deployment's native size.</li>
+<li><strong>Gemini:</strong> <code>embedding_dims or output_dimensionality or 768</code>, then sends it as <code>output_dimensionality</code> in <code>EmbedContentConfig</code>.</li>
+<li><strong>Vertex AI:</strong> <code>256</code>; passed as <code>output_dimensionality</code> to <code>get_embeddings</code>.</li>
+<li><strong>Ollama:</strong> <code>512</code> (note: the actual model may return a different size — this is just metadata).</li>
+<li><strong>Together:</strong> <code>768</code> (marked with a <code># TODO: check if this is correct</code> in source).</li>
+<li><strong>LM Studio:</strong> <code>1536</code>.</li>
+<li><strong>FastEmbed:</strong> auto-detected from <code>dense_model.embedding_size</code>.</li>
+<li><strong>HuggingFace (local):</strong> auto-detected via <code>model.get_sentence_embedding_dimension()</code>.</li>
+<li><strong>AWS Bedrock & LangChain:</strong> do not set <code>embedding_dims</code> at all — the field stays whatever the config had (or <code>None</code>).</li>
+</ul>
+</details>
+</section>
+
+<section id="providers">
+<h2>Provider catalogue (11 real providers)</h2>
+<p>Counted directly from <code>mem0/embeddings/</code> (excluding <code>base.py</code>, <code>configs.py</code>, <code>__init__.py</code>, and the test-only <code>mock.py</code>). Each maps to a class in <code>EmbedderFactory.provider_to_class</code>.</p>
+<table>
+<thead><tr><th>Provider key</th><th>File</th><th>Class</th><th>Default model</th><th>Default dims</th><th>SDK / backend</th></tr></thead>
+<tbody>
+<tr><td><code>openai</code></td><td><code>openai.py</code></td><td><code>OpenAIEmbedding</code></td><td><code>text-embedding-3-small</code></td><td>1536</td><td><code>openai.OpenAI</code></td></tr>
+<tr><td><code>azure_openai</code></td><td><code>azure_openai.py</code></td><td><code>AzureOpenAIEmbedding</code></td><td>(deployment)</td><td>(native)</td><td><code>openai.AzureOpenAI</code></td></tr>
+<tr><td><code>gemini</code></td><td><code>gemini.py</code></td><td><code>GoogleGenAIEmbedding</code></td><td><code>models/gemini-embedding-001</code></td><td>768</td><td><code>google.genai</code></td></tr>
+<tr><td><code>vertexai</code></td><td><code>vertexai.py</code></td><td><code>VertexAIEmbedding</code></td><td><code>gemini-embedding-001</code></td><td>256</td><td><code>vertexai.language_models</code></td></tr>
+<tr><td><code>huggingface</code></td><td><code>huggingface.py</code></td><td><code>HuggingFaceEmbedding</code></td><td><code>multi-qa-MiniLM-L6-cos-v1</code> (local) / <code>tei</code> (remote)</td><td>auto-detect</td><td><code>sentence-transformers</code> or TEI via <code>openai</code></td></tr>
+<tr><td><code>fastembed</code></td><td><code>fastembed.py</code></td><td><code>FastEmbedEmbedding</code></td><td><code>thenlper/gte-large</code></td><td>auto-detect</td><td><code>fastembed</code> (ONNX)</td></tr>
+<tr><td><code>ollama</code></td><td><code>ollama.py</code></td><td><code>OllamaEmbedding</code></td><td><code>nomic-embed-text</code></td><td>512</td><td><code>ollama.Client</code></td></tr>
+<tr><td><code>together</code></td><td><code>together.py</code></td><td><code>TogetherEmbedding</code></td><td><code>togethercomputer/m2-bert-80M-8k-retrieval</code></td><td>768</td><td><code>together.Together</code></td></tr>
+<tr><td><code>lmstudio</code></td><td><code>lmstudio.py</code></td><td><code>LMStudioEmbedding</code></td><td><code>nomic-embed-text-v1.5</code> GGUF</td><td>1536</td><td><code>openai.OpenAI</code> (local)</td></tr>
+<tr><td><code>aws_bedrock</code></td><td><code>aws_bedrock.py</code></td><td><code>AWSBedrockEmbedding</code></td><td><code>amazon.titan-embed-text-v1</code></td><td>(unset)</td><td><code>boto3</code> bedrock-runtime</td></tr>
+<tr><td><code>langchain</code></td><td><code>langchain.py</code></td><td><code>LangchainEmbedding</code></td><td>(required, object)</td><td>(unset)</td><td>any LangChain <code>Embeddings</code></td></tr>
+</tbody>
+</table>
+<aside class="callout insight"><strong>Insight</strong> Three of the eleven are thin shims over the OpenAI SDK pointed at a different base URL: <code>lmstudio</code> (local LM Studio server), HuggingFace's <em>remote</em> TEI mode, and OpenAI itself (which also serves vLLM / Voyage / any OpenAI-compatible endpoint via <code>openai_base_url</code>). The OpenAI-compatible protocol is the de-facto lingua franca of this layer.</aside>
+
+<h3>Per-provider notes</h3>
+<dl>
+<dt>OpenAI</dt><dd>Resolves base URL from <code>openai_base_url</code> → <code>OPENAI_API_BASE</code> → <code>OPENAI_BASE_URL</code> → official. <code>OPENAI_API_BASE</code> emits a <code>DeprecationWarning</code> (slated for removal in 0.1.80). Strips newlines (<code>text.replace("\n", " ")</code>) before embedding.</dd>
+<dt>Azure OpenAI</dt><dd>Reads <code>EMBEDDING_AZURE_*</code> env vars. If no API key (or the placeholder <code>"your-api-key"</code>) is given, it falls back to <code>DefaultAzureCredential</code> + bearer-token provider for AAD auth against scope <code>https://cognitiveservices.azure.com/.default</code>.</dd>
+<dt>Gemini (Google GenAI)</dt><dd>Uses the newer <code>google.genai</code> client (not the legacy <code>google.generativeai</code>). Sends <code>output_dimensionality</code> via <code>types.EmbedContentConfig</code>. API key from config or <code>GOOGLE_API_KEY</code>.</dd>
+<dt>Vertex AI</dt><dd>The only provider that <em>uses</em> <code>memory_action</code> — see <a href="#action-aware">action-aware embeddings</a> below. Auth goes through <code>mem0.utils.gcp_auth.GCPAuthenticator</code> with a fallback to <code>GOOGLE_APPLICATION_CREDENTIALS</code>.</dd>
+<dt>HuggingFace</dt><dd>Dual-mode. With <code>huggingface_base_url</code> it talks to a Text-Embeddings-Inference (TEI) server via the OpenAI client. Otherwise it loads a local <code>SentenceTransformer(model, **model_kwargs)</code> and calls <code>.encode(text, convert_to_numpy=True).tolist()</code>. Quiets <code>transformers</code>/<code>sentence_transformers</code>/<code>huggingface_hub</code> loggers to WARNING.</dd>
+<dt>FastEmbed</dt><dd>CPU ONNX runtime via <code>TextEmbedding</code>. <code>embed()</code> materialises the generator with <code>list(...)[0]</code>. Raises a clear <code>ImportError</code> at import time if <code>fastembed</code> is missing.</dd>
+<dt>Ollama</dt><dd>If the <code>ollama</code> package is missing it <em>prompts interactively</em> (<code>input(...)</code>) to pip-install it. On construction it lists local models and <code>pull()</code>s the embedding model if absent (with a <code>:latest</code> tag-normalisation helper). Raises <code>ValueError</code> if the embed response contains no vectors.</dd>
+<dt>Together</dt><dd>Plain Together SDK call; API key from config or <code>TOGETHER_API_KEY</code>.</dd>
+<dt>LM Studio</dt><dd>OpenAI client against <code>lmstudio_base_url</code>; API key defaults to the literal <code>"lm-studio"</code>.</dd>
+<dt>AWS Bedrock</dt><dd>Branches request shape on model prefix: <code>cohere.*</code> uses <code>{input_type, texts}</code> and reads <code>embeddings[0]</code>; Amazon Titan and others use <code>{inputText}</code> and read <code>embedding</code>. Has a <code>_normalize_vector()</code> helper (unit-norm) defined but not called by <code>embed()</code>. Wraps API errors in a <code>ValueError</code>.</dd>
+<dt>LangChain</dt><dd>Passthrough adapter — see below.</dd>
+</dl>
+</section>
+
+<section id="langchain-passthrough">
+<h2>The LangChain passthrough</h2>
+<p><code>LangchainEmbedding</code> is an adapter, not a client. It wraps any object implementing LangChain's <code>Embeddings</code> interface.</p>
+<pre><code class="language-python">class LangchainEmbedding(EmbeddingBase):
+    def __init__(self, config=None):
+        super().__init__(config)
+        if self.config.model is None:
+            raise ValueError("`model` parameter is required")
+        if not isinstance(self.config.model, Embeddings):
+            raise ValueError("`model` must be an instance of Embeddings")
+        self.langchain_model = self.config.model
+
+    def embed(self, text, memory_action=None):
+        return self.langchain_model.embed_query(text)</code></pre>
+<ul>
+<li><strong><code>config.model</code> is an object, not a string</strong> — you pass an already-instantiated LangChain embeddings object (e.g. <code>OpenAIEmbeddings()</code>). It is validated with <code>isinstance(..., Embeddings)</code>.</li>
+<li>Always calls <code>embed_query()</code> (the single-text method), even for "add" actions — it does not use LangChain's <code>embed_documents()</code> bulk path.</li>
+<li>Does not set <code>embedding_dims</code>; you must set <code>embedding_model_dims</code> on the vector store yourself to match the wrapped model.</li>
+<li>Raises <code>ImportError</code> at import if <code>langchain</code> is not installed.</li>
+</ul>
+<aside class="callout insight"><strong>Insight</strong> The same passthrough pattern appears across the codebase — there is a parallel <code>langchain</code> key in the <a href="llms.html">LLM</a> and <a href="vector-stores.html">vector-store</a> factories. It is the project's escape hatch for any backend mem0 doesn't natively support.</aside>
+</section>
+
+<section id="action-aware">
+<h2>Action-aware embeddings (memory_action)</h2>
+<p>The engine tags every embed call with the operation that triggered it. From <code>mem0/memory/main.py</code>:</p>
+<pre><code class="language-python">msg_embeddings   = self.embedding_model.embed(msg_content, "add")
+query_embedding  = self.embedding_model.embed(parsed_messages, "search")
+existing         = self.embedding_model.embed(data, "update")
+mem_embeddings   = self.embedding_model.embed_batch(mem_texts, "add")
+entity_embedding = self.embedding_model.embed(entity_text, "add")   # entity linking</code></pre>
+<p>Of the 11 providers, <strong>only Vertex AI consumes the argument</strong>. It maps actions to Vertex task types:</p>
+<table>
+<thead><tr><th><code>memory_action</code></th><th>Vertex task type (default)</th><th>Override field</th></tr></thead>
+<tbody>
+<tr><td><code>"add"</code></td><td><code>RETRIEVAL_DOCUMENT</code></td><td><code>memory_add_embedding_type</code></td></tr>
+<tr><td><code>"update"</code></td><td><code>RETRIEVAL_DOCUMENT</code></td><td><code>memory_update_embedding_type</code></td></tr>
+<tr><td><code>"search"</code></td><td><code>RETRIEVAL_QUERY</code></td><td><code>memory_search_embedding_type</code></td></tr>
+<tr><td><code>None</code></td><td><code>SEMANTIC_SIMILARITY</code></td><td>—</td></tr>
+</tbody>
+</table>
+<aside class="callout decision"><strong>Decision</strong> Asymmetric document/query embedding (encoding stored facts as <code>RETRIEVAL_DOCUMENT</code> and queries as <code>RETRIEVAL_QUERY</code>) measurably improves retrieval on dual-encoder models. mem0 plumbs the action through the whole layer so any provider <em>can</em> opt in, even though only Vertex does today. This supports the multi-signal retrieval described in <a href="memory-algorithm.html">the memory algorithm</a> and the <a href="data-flow.html">add/search data flow</a>.</aside>
+</section>
+
+<section id="factory">
+<h2>Construction: EmbedderFactory</h2>
+<p><code>EmbedderFactory.create()</code> in <code>mem0/utils/factory.py</code> turns a provider key + config dict into a live embedder.</p>
+<pre><code class="language-python">@classmethod
+def create(cls, provider_name, config, vector_config):
+    if provider_name == "upstash_vector" and vector_config and vector_config.enable_embeddings:
+        return MockEmbeddings()
+    class_type = cls.provider_to_class.get(provider_name)
+    if class_type:
+        embedder_instance = load_class(class_type)        # importlib by string path
+        base_config = BaseEmbedderConfig(**config)        # splat dict into fat config
+        return embedder_instance(base_config)
+    raise ValueError(f"Unsupported Embedder provider: {provider_name}")</code></pre>
+<ul>
+<li><strong>Lazy import:</strong> <code>load_class</code> does <code>importlib.import_module(...).getattr(...)</code>, so a provider's heavy SDK is only imported when that provider is actually selected.</li>
+<li><strong>Upstash special-case:</strong> when the chosen vector store is Upstash with <code>enable_embeddings=True</code>, Upstash embeds server-side — so the factory returns <code>MockEmbeddings()</code> as a no-op stand-in and the local embedder is bypassed entirely.</li>
+</ul>
+<aside class="callout security"><strong>Security / footgun</strong> The Ollama provider runs <code>input("...Install it now? [y/N]")</code> and then <code>pip install ollama</code> via <code>subprocess.check_call</code> at import time if the package is missing. In a non-interactive server (see <a href="server.html">the self-hosted server</a>) this blocks on stdin or installs packages at runtime — pre-install <code>ollama</code> to avoid it.</aside>
+</section>
+
+<section id="mock">
+<h2>MockEmbeddings (tests & Upstash)</h2>
+<p><code>mem0/embeddings/mock.py</code> — the smallest possible embedder.</p>
+<pre><code class="language-python">class MockEmbeddings(EmbeddingBase):
+    def embed(self, text, memory_action=None):
+        # Always returns a fixed 10-dimensional vector
+        return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]</code></pre>
+<ul>
+<li>Returns a constant 10-d vector regardless of input — deterministic, no network, no API key.</li>
+<li>Used by unit tests and as the no-op stand-in for the Upstash server-side-embedding path (see the factory above).</li>
+<li>Not in <code>EmbedderFactory.provider_to_class</code> and not in <code>EmbedderConfig</code>'s allow-list, so you cannot select it via normal config — it is internal-only.</li>
+</ul>
+<aside class="callout gotcha"><strong>Gotcha</strong> Because the mock always returns the <em>same</em> vector, every memory embeds to an identical point. Cosine similarity between any two memories is 1.0, so ranking is meaningless under the mock — fine for plumbing/integration tests, useless for testing retrieval quality.</aside>
+</section>
+
+<section id="defaults">
+<h2>Defaults summary</h2>
+<dl>
+<dt>Default provider</dt><dd><code>openai</code> (from <code>EmbedderConfig.provider</code> and <code>MemoryConfig.embedder</code> default factory).</dd>
+<dt>Default model</dt><dd><code>text-embedding-3-small</code>.</dd>
+<dt>Default dims</dt><dd><code>1536</code> on both the embedder and the vector store — the only configuration where the two dimension fields agree without manual intervention.</dd>
+<dt>Required env</dt><dd><code>OPENAI_API_KEY</code> (unless overridden via <code>api_key</code> in config).</dd>
+</dl>
+
+<pre class="mermaid">
+flowchart LR
+  cfg["MemoryConfig.embedder<br/>(EmbedderConfig: provider + config dict)"] --> fac["EmbedderFactory.create"]
+  fac -->|"importlib by string path"| prov["Provider e.g. OpenAIEmbedding"]
+  fac -.->|"upstash + enable_embeddings"| mock["MockEmbeddings"]
+  prov --> embed["embed(text, memory_action)"]
+  embed --> vec["list[float]"]
+  vec --> store["Vector store insert/search<br/>(embedding_model_dims must match)"]
+</pre>
+</section>

@@ -1,0 +1,3781 @@
+{
+  "name": "mem0 wiki knowledge graph",
+  "generated": "2026-06-01",
+  "source": "https://github.com/mem0ai/mem0",
+  "pages": [
+    {
+      "slug": "architecture",
+      "title": "Architecture Overview",
+      "group": "Overview",
+      "summary": "mem0 is a polyglot monorepo centered on the mem0 Python SDK (PyPI mem0ai) and its TypeScript twin mem0-ts, each exposing two usage modes from one import surface: a self-hosted Memory/AsyncMemory engine and a thin hosted MemoryClient. The self-hosted engine is fully config-driven: a single MemoryConfig Pydantic model drives four factories that lazily instantiate concrete LLM, embedding, vector-store, and reranker providers behind abstract base classes. Each provider category follows a consistent plugin shape (base.py + concrete modules + config + factory registry). Graph memory, formerly a fifth category, has been removed from the OSS core and replaced by in-pipeline entity linking."
+    },
+    {
+      "slug": "data-flow",
+      "title": "Data Flow",
+      "group": "Overview",
+      "summary": "Traces the two engine hot paths end to end. add() normalizes messages then runs either an infer=False verbatim fast path or the infer=True V3 phased batch pipeline: existing-memory retrieval, one ADD-only LLM extraction call, batch embedding, MD5 hash dedup, batch vector upsert, batch SQLite history insert, batch entity linking, message buffering, and telemetry. search() embeds the query while computing BM25 keyword and entity-store signals, fuses them additively over an adaptive divisor in score_and_rank(), and optionally reranks. AsyncMemory mirrors both paths with asyncio.to_thread around every blocking call (and asyncio.gather only in delete_all); notably there is no temporal ranking at query time — temporal reasoning is an extraction-time concern."
+    },
+    {
+      "slug": "memory-engine",
+      "title": "Memory Engine",
+      "group": "Core",
+      "summary": "The Memory Engine documents the OSS core of mem0: the Memory and AsyncMemory classes in mem0/memory/main.py, both built on the abstract MemoryBase, that orchestrate embedding, vector storage, single-pass LLM extraction, entity linking, and a local SQLite change log. It covers construction (Memory(config) and from_config), every public method's signature and semantics (add/search/get/get_all/update/delete/delete_all/history/reset), the sync-vs-async design where AsyncMemory mirrors Memory via asyncio.to_thread, the SQLiteManager history/messages schema and migration, session scoping with required identifiers, metadata shaping, the infer=False raw path, telemetry, and the ~/.mem0 setup. It surfaces gotchas around required identifiers, filters-vs-top-level kwargs, and async/sync error-type drift."
+    },
+    {
+      "slug": "memory-algorithm",
+      "title": "Memory Algorithm",
+      "group": "Core",
+      "summary": "The April-2026 (SDK v2.0.0/v3.0.0) rewrite of mem0's memory pipeline: a single-pass ADD-only extractor (one LLM call, no UPDATE/DELETE, memories accumulate) and a multi-signal hybrid retriever that fuses dense semantic similarity, BM25 keyword matching over lemmatized text, and an entity-linking boost into one combined score. Extraction grounds relative time references to absolute dates so dated instances become independently retrievable, enabling temporal queries. Entity linking (the OSS replacement for graph memory) stores entities in a parallel vector collection and consumes them only as a retrieval boost. spaCy is an optional [nlp] extra; without it the system degrades to semantic-only."
+    },
+    {
+      "slug": "config-system",
+      "title": "Configuration System",
+      "group": "Core",
+      "summary": "mem0 is configuration-driven: a single Pydantic v2 MemoryConfig (in mem0/configs/base.py) aggregates four {provider, config} sub-config wrappers for the LLM, embedder, vector store, and optional reranker, plus scalar settings like history_db_path, version, and custom_instructions. Four factories in mem0/utils/factory.py (LlmFactory, EmbedderFactory, VectorStoreFactory, RerankerFactory) map provider strings to implementation class paths and lazily import them via load_class(), turning config dicts into live provider instances. The default stack is OpenAI LLM + embedder + local Qdrant, so a bare Memory() works with just OPENAI_API_KEY. Both nested-dict (Memory.from_config) and typed-object construction converge on the same validated tree."
+    },
+    {
+      "slug": "llms",
+      "title": "LLM Providers",
+      "group": "Providers",
+      "summary": "The LLM layer is a plugin family where every provider subclasses LLMBase and implements one generate_response method returning a string or a normalised tool-call dict. There are 18 provider implementations spanning OpenAI-compatible APIs, native Anthropic/Gemini/Bedrock SDKs, local runtimes (Ollama, LM Studio, vLLM), and aggregators (LiteLLM, LangChain), wired by LlmFactory. The default is the openai provider on gpt-5-mini. Structured output is handled primarily via response_format JSON mode, with dedicated openai_structured/azure_openai_structured variants for schema-validated parsing."
+    },
+    {
+      "slug": "embeddings",
+      "title": "Embedding Providers",
+      "group": "Providers",
+      "summary": "The embeddings layer converts text into dense vectors via a single abstract contract, EmbeddingBase.embed(text, memory_action), implemented by 11 real providers (plus a 10-dim MockEmbeddings for tests) and wired by EmbedderFactory from a declarative EmbedderConfig. It defaults to OpenAI text-embedding-3-small at 1536 dims. A key seam: the embedder's embedding_dims and the vector store's embedding_model_dims are separate, non-auto-synced fields that both default to 1536 — switching to a non-1536 model requires updating the vector store config by hand. Only Vertex AI uses the memory_action argument (mapping add/update/search to RETRIEVAL_DOCUMENT/RETRIEVAL_QUERY task types)."
+    },
+    {
+      "slug": "vector-stores",
+      "title": "Vector Stores",
+      "group": "Providers",
+      "summary": "The vector store layer persists each mem0 memory as a dense embedding plus a flat JSON payload across 24 pluggable backends behind one abstract interface, VectorStoreBase. Stores share an insert/search/get/list/delete/update contract plus collection lifecycle ops, and an enhanced filter dialect (comparison, list, string, and AND/OR/NOT logical operators) that each provider translates natively. Qdrant is the default and richest implementation with hybrid dense + BM25 sparse search; pgvector ships rich SQL filter operators; 15 of 24 providers add native keyword/BM25 search consumed by the hybrid retrieval algorithm."
+    },
+    {
+      "slug": "rerankers",
+      "title": "Rerankers",
+      "group": "Providers",
+      "summary": "The reranker layer is an optional, opt-in second-stage scorer that re-orders candidate memories returned by mem0's multi-signal retrieval before they are returned to the caller. Every provider subclasses BaseReranker and implements a single rerank(query, documents, top_k) method that attaches a rerank_score and returns documents sorted descending. Five providers ship (cohere, sentence_transformer, huggingface, llm_reranker, zero_entropy) spanning hosted APIs, local cross-encoders, and LLM-as-judge. Reranking runs only when a reranker is configured in MemoryConfig.reranker AND the caller passes rerank=True to search()."
+    },
+    {
+      "slug": "graph-memory",
+      "title": "Graph Memory (deprecated)",
+      "group": "Providers",
+      "summary": "Graph Memory was an optional relationship-aware retrieval layer that layered a property graph (Neo4j, Memgraph, Kuzu, Apache AGE, Amazon Neptune) over mem0's vector store, opted into via a graph_store section of MemoryConfig and an enable_graph flag. It has been removed entirely from both the Python and TypeScript OSS packages in the v3 rewrite (commit 59880a6f), with docs cleaned up in #5277. Its function — surfacing memories connected through shared entities — is now handled by native entity linking: a sibling {collection}_entities vector collection plus a retrieval-time entity boost (ENTITY_BOOST_WEIGHT=0.5) fused into the combined score, requiring no external graph database. Users upgrading should drop enable_graph/graph_store config; no data migration is needed, but the old relations field is no longer populated."
+    },
+    {
+      "slug": "client-sdk",
+      "title": "Hosted Client & Proxy",
+      "group": "Interfaces",
+      "summary": "Documents the hosted-platform clients MemoryClient (sync) and AsyncMemoryClient (async) in mem0/client/main.py — thin httpx wrappers over api.mem0.ai authenticated by MEM0_API_KEY, with org_id/project_id resolved from the key via GET /v1/ping/. Covers every public method (add/search/get/get_all/update/delete/delete_all/history/users/delete_users/reset/batch_update/batch_delete/export/summary/feedback/webhooks), the typed Pydantic option models, the api_error_handler decorator that maps HTTP status codes to structured MemoryError subclasses, telemetry capture, the Project/AsyncProject management API, and the LiteLLM-based chat-completion proxy that retrieves+injects memories and writes new turns on a daemon thread. Contrasts the HTTP client with the in-process self-hosted engine and notes the recent delete_linked and latest_only/latestOnly features on hosted reads."
+    },
+    {
+      "slug": "server",
+      "title": "Self-Hosted Server",
+      "group": "Interfaces",
+      "summary": "The server/ directory is a standalone FastAPI app that wraps the OSS Memory engine in a secure REST API plus a Next.js dashboard. Auth is on by default (Bearer JWT, per-user X-API-Key, or legacy ADMIN_API_KEY), the server refuses to boot without JWT_SECRET unless AUTH_DISABLED=true, and state lives in two Postgres databases on one pgvector instance (memories + a mem0_app auth/audit DB migrated by Alembic). Notable mechanics include single-use rotating refresh tokens, constant-time login, slowapi rate limits on auth routes, off-hot-path request logging with BRIN-indexed pruning, an upstream-error classifier returning clean 502s, and the recent /search 502 fix with rich pgvector filter operators."
+    },
+    {
+      "slug": "typescript-sdk",
+      "title": "TypeScript SDK",
+      "group": "Interfaces",
+      "summary": "The mem0ai npm package (mem0-ts/) ships two surfaces: a thin hosted-platform client (import { MemoryClient } from \"mem0ai\") and a self-contained OSS memory engine (import { Memory } from \"mem0ai/oss\"). The OSS side is a faithful port of the Python Memory engine — same config-driven provider factories, same April-2026 single-pass additive extraction algorithm, same entity-linking retrieval — built dual-format (CJS+ESM) with tsup and tested with Jest. Key divergences from Python: no AsyncMemory/AsyncMemoryClient duplicate classes (everything is already promise-based), no LLM proxy wrapper, no graph-memory store and no OSS reranker layer; the TS provider roster is a curated subset (11 LLMs, 6 embedders, 8 vector stores)."
+    },
+    {
+      "slug": "openmemory",
+      "title": "OpenMemory Platform",
+      "group": "Interfaces",
+      "summary": "OpenMemory is a self-hosted, single-user memory platform under openmemory/ that wraps the mem0 OSS Memory engine in a FastAPI service, exposes five memory tools over an MCP server (port 8765, SSE + Streamable HTTP transports), and ships a Next.js 15 / React 19 dashboard (port 3000) backed by Redux Toolkit. It keeps a relational SQLite mirror (state, ACLs, audit logs, categories) alongside vectors stored in Qdrant by default (port 6333), with provider auto-detection and a three-revision Alembic chain. It is operationally distinct from server/: no auth, open CORS, one implicit user, intended for local use."
+    },
+    {
+      "slug": "integrations",
+      "title": "Integrations & Ecosystem",
+      "group": "Ecosystem",
+      "summary": "Surveys mem0's first-party clients and editor plugins: the Python (mem0-cli) and Node (@mem0/cli) CLIs with their Agent Mode <5s key bootstrap and AGENTRUSH game; the mem0-plugin that wires Claude Code/Cursor/Codex/OpenCode/Antigravity to the remote MCP server (mcp.mem0.ai) with lifecycle hooks for automatic capture and nine MCP tools; the @mem0/openclaw-mem0 plugin with token-budgeted recall, pre-extraction filtering, per-agent isolation, and the cost-gated dream consolidation; the @mem0/vercel-ai-provider for AI SDK v5; and the reference vs pipeline skills. Each integration's package, install, and connection path (REST, MCP, or embedded mem0ai SDK) is documented against the source."
+    },
+    {
+      "slug": "evaluation",
+      "title": "Evaluation & Benchmarks",
+      "group": "Ecosystem",
+      "summary": "mem0's benchmarking harness under evaluation/ has two phases: a per-technique experiment runner (run_experiments.py) that drives the hosted mem0 platform plus RAG, full-context, LangMem, Zep, and OpenAI baselines against the LoCoMo dataset, and a scorer (evals.py + generate_scores.py) applying BLEU, token-F1, and a GPT-4o-mini LLM-as-judge. The headline April-2026 results (LoCoMo 91.6, LongMemEval 94.8, BEAM 64.1/48.6 at ~7K tokens and ~1s p50) come from a separate open-sourced framework (mem0ai/memory-benchmarks) and reflect single-pass retrieval with no agentic loops. The in-repo harness only covers LoCoMo; LongMemEval and BEAM runners are not vendored here."
+    },
+    {
+      "slug": "surprises",
+      "title": "Surprises & Gotchas",
+      "group": "Meta",
+      "summary": "Authored wiki/_src/bodies/surprises.html, the cross-cutting \"Surprises & Gotchas\" page. Deduplicated and merged the 134 candidate findings into 6 themed sections (Clever Patterns, Performance, Correctness & Gotchas, Security, Deprecations & Migrations, Design Decisions) with ~45 high-signal items, each carrying a bold title and an inline cross-link. Verified the most important claims against the real source before writing: recounted providers in mem0/utils/factory.py (18 LLMs, 24 vector stores, 11 embeddings, 5 rerankers, 0 graph stores — AGENTS.md counts are stale); confirmed no graph refs in mem0/memory/main.py and no graph_store on MemoryConfig; verified score_and_rank in mem0/utils/scoring.py (threshold-before-fusion, adaptive 1.0/1.5/2.0/2.5 divisor); verified entity-boost attenuation 1/(1+0.001(n-1)^2) and the >=0.5 vs >=0.95 thresholds; keyword_search None sentinel; server auth patterns (consume_refresh_jti conditional UPDATE, dummy_verify_password, 004_unique_admin_role.py); ollama/litellm pip-install-at-import; OpenAI embed_batch re-sort by .index; AsyncMemoryClient blocking requests in __init__; LLMBase._is_reasoning_model excluding gpt-5-mini; Azure assistant->ai replace; OpenMemory categorization hard-wired to gpt-4o-mini and MCP search calling vector_store.search() directly. The page opens with an executive lead plus a decision callout framing the single biggest theme (ADD-only single-LLM-call engine, no graph DB). Used dl/ul, callouts (insight/gotcha/decision/perf/security), and three details deep-dives; cross-linked ~40 times across all registry slugs."
+    },
+    {
+      "slug": "glossary",
+      "title": "Glossary & Concept Index",
+      "group": "Meta",
+      "summary": "All concepts indexed and grouped."
+    }
+  ],
+  "concepts": [
+    {
+      "id": "add-memories-tool",
+      "label": "add_memories / search_memory / list_memories / delete_memories / delete_all_memories tools",
+      "kind": "interface",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "add-only-extraction",
+      "label": "ADD-only single-LLM-call extraction",
+      "kind": "pattern",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "add-phased-pipeline",
+      "label": "V3 phased batch add pipeline",
+      "kind": "algorithm",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "add-to-vector-store",
+      "label": "_add_to_vector_store phased batch pipeline",
+      "kind": "algorithm",
+      "pages": [
+        "data-flow",
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "add-to-vector-store-pipeline",
+      "label": "addToVectorStore v3 phased pipeline",
+      "kind": "algorithm",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "additive-extraction-prompt",
+      "label": "ADDITIVE_EXTRACTION_PROMPT (ADD-only)",
+      "kind": "pattern",
+      "pages": [
+        "data-flow",
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "additive-extraction-prompt-ts",
+      "label": "ADDITIVE_EXTRACTION_PROMPT (ported)",
+      "kind": "algorithm",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "agent-context-suffix",
+      "label": "AGENT_CONTEXT_SUFFIX (agent-scoped facts)",
+      "kind": "pattern",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "agent-mode-bootstrap",
+      "label": "Agent Mode bootstrap (init --agent)",
+      "kind": "pattern",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "alembic-chain",
+      "label": "Alembic migration chain (3 revisions)",
+      "kind": "pattern",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "alembic-migrations",
+      "label": "Alembic migrations (mem0_app DB)",
+      "kind": "module",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "anonymous-telemetry",
+      "label": "AnonymousTelemetry",
+      "kind": "service",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "answer-prompts",
+      "label": "ANSWER_PROMPT / ANSWER_PROMPT_GRAPH / ANSWER_PROMPT_ZEP",
+      "kind": "pattern",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "anthropic-llm",
+      "label": "AnthropicLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "apache-age-backend",
+      "label": "Apache AGE graph backend (removed)",
+      "kind": "provider",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "api-error-handler",
+      "label": "api_error_handler decorator",
+      "kind": "pattern",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "api-key-auth",
+      "label": "Per-user API keys (m0sk_)",
+      "kind": "service",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "async-is-copy",
+      "label": "AsyncMemory is a duplicate, not a wrapper",
+      "kind": "design",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "async-memory-class",
+      "label": "AsyncMemory",
+      "kind": "class",
+      "pages": [
+        "data-flow",
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "async-memory-client",
+      "label": "AsyncMemoryClient",
+      "kind": "class",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "asyncio-to-thread",
+      "label": "asyncio.to_thread offloading",
+      "kind": "pattern",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "aws-bedrock-llm",
+      "label": "AWSBedrockLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "azure-config",
+      "label": "AzureConfig",
+      "kind": "class",
+      "pages": [
+        "config-system"
+      ]
+    },
+    {
+      "id": "azure-openai-embedding",
+      "label": "AzureOpenAIEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "azure-openai-llm",
+      "label": "AzureOpenAILLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "backup-router",
+      "label": "Backup export/import (provider-agnostic)",
+      "kind": "module",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "base-embedder-config",
+      "label": "BaseEmbedderConfig",
+      "kind": "class",
+      "pages": [
+        "config-system",
+        "embeddings"
+      ]
+    },
+    {
+      "id": "base-llm-config",
+      "label": "BaseLlmConfig",
+      "kind": "class",
+      "pages": [
+        "config-system",
+        "llms"
+      ]
+    },
+    {
+      "id": "base-project",
+      "label": "BaseProject / Project / AsyncProject",
+      "kind": "class",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "base-reranker",
+      "label": "BaseReranker",
+      "kind": "interface",
+      "pages": [
+        "architecture",
+        "rerankers"
+      ]
+    },
+    {
+      "id": "base-reranker-config",
+      "label": "BaseRerankerConfig",
+      "kind": "class",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "beam",
+      "label": "BEAM benchmark (1M/10M)",
+      "kind": "concept",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "build-filters-and-metadata",
+      "label": "_build_filters_and_metadata",
+      "kind": "algorithm",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "build-filters-metadata",
+      "label": "_build_filters_and_metadata",
+      "kind": "pattern",
+      "pages": [
+        "data-flow"
+      ]
+    },
+    {
+      "id": "camel-snake-translation",
+      "label": "camelToSnakeKeys / snakeToCamelKeys",
+      "kind": "pattern",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "capture-client-event",
+      "label": "capture_client_event telemetry",
+      "kind": "service",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "categorization",
+      "label": "OpenAI auto-categorization event hooks",
+      "kind": "algorithm",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "check-memory-access-permissions",
+      "label": "check_memory_access_permissions (ACL)",
+      "kind": "algorithm",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "client-option-models",
+      "label": "Pydantic option models (AddMemoryOptions, SearchMemoryOptions, etc.)",
+      "kind": "module",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "cohere-reranker",
+      "label": "CohereReranker",
+      "kind": "provider",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "compute-entity-boosts",
+      "label": "_compute_entity_boosts (entity linking boost)",
+      "kind": "algorithm",
+      "pages": [
+        "data-flow",
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "config-router",
+      "label": "Config router + configs table",
+      "kind": "module",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "constant-time-login",
+      "label": "Constant-time login (dummy_verify_password)",
+      "kind": "security",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "create-memory",
+      "label": "_create_memory",
+      "kind": "algorithm",
+      "pages": [
+        "data-flow"
+      ]
+    },
+    {
+      "id": "db-models",
+      "label": "SQLAlchemy models (users/api_keys/request_logs/settings)",
+      "kind": "class",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "delete-linked",
+      "label": "delete_linked",
+      "kind": "concept",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "dream-gate",
+      "label": "Dream-gate consolidation",
+      "kind": "algorithm",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "embedder-config",
+      "label": "EmbedderConfig",
+      "kind": "class",
+      "pages": [
+        "config-system",
+        "embeddings"
+      ]
+    },
+    {
+      "id": "embedder-factory",
+      "label": "EmbedderFactory",
+      "kind": "class",
+      "pages": [
+        "architecture",
+        "config-system",
+        "embeddings"
+      ]
+    },
+    {
+      "id": "embedder-interface-ts",
+      "label": "Embedder interface",
+      "kind": "interface",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "embedding-base",
+      "label": "EmbeddingBase",
+      "kind": "interface",
+      "pages": [
+        "architecture",
+        "embeddings"
+      ]
+    },
+    {
+      "id": "embedding-dims-flow",
+      "label": "embedding_dims vs embedding_model_dims",
+      "kind": "concept",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "entity-boost-attenuation",
+      "label": "Spread-attenuated entity boost (hub damping)",
+      "kind": "pattern",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "entity-boost-weight",
+      "label": "ENTITY_BOOST_WEIGHT",
+      "kind": "concept",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "entity-extraction",
+      "label": "extract_entities / extract_entities_batch",
+      "kind": "module",
+      "pages": [
+        "data-flow"
+      ]
+    },
+    {
+      "id": "entity-linking",
+      "label": "Entity Linking",
+      "kind": "algorithm",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "entity-param-asymmetry",
+      "label": "Top-level identifier asymmetry (add vs search/get_all)",
+      "kind": "gotcha",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "entity-store",
+      "label": "Entity store collection ({collection}_entities)",
+      "kind": "service",
+      "pages": [
+        "data-flow",
+        "graph-memory",
+        "memory-algorithm",
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "entity-store-ts",
+      "label": "Entity store (graph replacement)",
+      "kind": "pattern",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "evals",
+      "label": "evals.py (scorer)",
+      "kind": "module",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "experiment-runner",
+      "label": "run_experiments.py (Experiment runner)",
+      "kind": "module",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "extract-entities",
+      "label": "extract_entities (spaCy entity extraction)",
+      "kind": "algorithm",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "extract-json",
+      "label": "extract_json normalisation",
+      "kind": "algorithm",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "faiss-store",
+      "label": "FAISS",
+      "kind": "provider",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "fastapi-app-main",
+      "label": "FastAPI app (server/main.py)",
+      "kind": "module",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "fastembed-embedding",
+      "label": "FastEmbedEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "filter-dialect",
+      "label": "Enhanced filter dialect (AND/OR/NOT + operators)",
+      "kind": "pattern",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "filtering-pipeline",
+      "label": "Pre-extraction filtering",
+      "kind": "algorithm",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "from-config",
+      "label": "Memory.from_config",
+      "kind": "pattern",
+      "pages": [
+        "config-system"
+      ]
+    },
+    {
+      "id": "gemini-llm",
+      "label": "GeminiLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "generate-response",
+      "label": "generate_response contract",
+      "kind": "interface",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "generate-scores",
+      "label": "generate_scores.py",
+      "kind": "module",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "get-memory-client",
+      "label": "get_memory_client (config assembly + caching)",
+      "kind": "module",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "google-genai-embedding",
+      "label": "GoogleGenAIEmbedding (Gemini)",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "graceful-fallback",
+      "label": "Graceful fallback pattern",
+      "kind": "pattern",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "graph-memory",
+      "label": "Graph Memory",
+      "kind": "concept",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "graph-memory-removed",
+      "label": "Graph memory removed from OSS core",
+      "kind": "deprecation",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "graph-store-config",
+      "label": "GraphStoreConfig (removed)",
+      "kind": "class",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "hash-dedup",
+      "label": "MD5 hash deduplication",
+      "kind": "pattern",
+      "pages": [
+        "data-flow"
+      ]
+    },
+    {
+      "id": "huggingface-embedding",
+      "label": "HuggingFaceEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "huggingface-reranker",
+      "label": "HuggingFaceReranker",
+      "kind": "provider",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "import-time-pip-install",
+      "label": "Import-time pip install (ollama, litellm)",
+      "kind": "security",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "infer-false-path",
+      "label": "infer=False raw path",
+      "kind": "pattern",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "keyword-search",
+      "label": "keyword_search / BM25 hybrid",
+      "kind": "algorithm",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "keyword-search-interface",
+      "label": "vector_store.keyword_search interface",
+      "kind": "interface",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "keyword-search-none-sentinel",
+      "label": "keyword_search None-as-not-supported sentinel",
+      "kind": "gotcha",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "kuzu-backend",
+      "label": "Kuzu graph backend (removed)",
+      "kind": "provider",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "langchain-embedding",
+      "label": "LangchainEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "langchain-llm",
+      "label": "LangchainLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "langmem-manager",
+      "label": "LangMemManager",
+      "kind": "class",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "latest-only",
+      "label": "latest_only / latestOnly",
+      "kind": "concept",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "lazy-dotted-factory",
+      "label": "Lazy dotted-string provider factories",
+      "kind": "pattern",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "lemmatize-bm25",
+      "label": "lemmatize_for_bm25",
+      "kind": "module",
+      "pages": [
+        "data-flow"
+      ]
+    },
+    {
+      "id": "lemmatize-for-bm25",
+      "label": "lemmatize_for_bm25",
+      "kind": "algorithm",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "lifecycle-hooks",
+      "label": "Lifecycle hooks (auto-capture)",
+      "kind": "pattern",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "litellm-completion",
+      "label": "litellm.completion wrapper",
+      "kind": "service",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "litellm-provider",
+      "label": "LiteLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "llm-base",
+      "label": "LLMBase",
+      "kind": "interface",
+      "pages": [
+        "architecture",
+        "llms"
+      ]
+    },
+    {
+      "id": "llm-config",
+      "label": "LlmConfig",
+      "kind": "class",
+      "pages": [
+        "config-system"
+      ]
+    },
+    {
+      "id": "llm-factory",
+      "label": "LlmFactory",
+      "kind": "class",
+      "pages": [
+        "architecture",
+        "config-system",
+        "llms"
+      ]
+    },
+    {
+      "id": "llm-interface-ts",
+      "label": "LLM interface",
+      "kind": "interface",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "llm-judge",
+      "label": "evaluate_llm_judge (LLM-as-judge)",
+      "kind": "algorithm",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "llm-reranker",
+      "label": "LLMReranker",
+      "kind": "provider",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "load-class",
+      "label": "load_class (importlib dispatch)",
+      "kind": "pattern",
+      "pages": [
+        "config-system"
+      ]
+    },
+    {
+      "id": "load-class-lazy-import",
+      "label": "load_class dotted-string lazy import",
+      "kind": "pattern",
+      "pages": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "locomo",
+      "label": "LoCoMo benchmark",
+      "kind": "concept",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "longmemeval",
+      "label": "LongMemEval benchmark",
+      "kind": "concept",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "make-bootstrap",
+      "label": "make bootstrap / seed wizard",
+      "kind": "pattern",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "mcp-server",
+      "label": "OpenMemory MCP server (FastMCP)",
+      "kind": "service",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "mcp-tools",
+      "label": "MCP memory tools",
+      "kind": "interface",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "mem0-cli-node",
+      "label": "@mem0/cli (Node Commander app)",
+      "kind": "service",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "mem0-cli-python",
+      "label": "mem0-cli (Python Typer app)",
+      "kind": "service",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "mem0-community-langchain",
+      "label": "@mem0/community (LangChain)",
+      "kind": "module",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "mem0-plugin",
+      "label": "mem0-plugin (MCP + hooks)",
+      "kind": "service",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "mem0-proxy",
+      "label": "Mem0 proxy (Completions.create)",
+      "kind": "class",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "memgraph-backend",
+      "label": "Memgraph graph backend (removed)",
+      "kind": "provider",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "memory",
+      "label": "Memory / AsyncMemory",
+      "kind": "class",
+      "pages": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "memory-action",
+      "label": "memory_action (action-aware embeddings)",
+      "kind": "concept",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "memory-add",
+      "label": "MemoryADD",
+      "kind": "class",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "memory-base",
+      "label": "MemoryBase",
+      "kind": "interface",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "memory-benchmarks-repo",
+      "label": "mem0ai/memory-benchmarks",
+      "kind": "service",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "memory-class",
+      "label": "Memory",
+      "kind": "class",
+      "pages": [
+        "data-flow",
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "memory-client",
+      "label": "MemoryClient / AsyncMemoryClient",
+      "kind": "class",
+      "pages": [
+        "architecture",
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "memory-client-ts",
+      "label": "MemoryClient (hosted)",
+      "kind": "class",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "memory-config",
+      "label": "MemoryConfig",
+      "kind": "class",
+      "pages": [
+        "architecture",
+        "config-system",
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "memory-error-hierarchy",
+      "label": "MemoryError exception hierarchy",
+      "kind": "class",
+      "pages": [
+        "client-sdk",
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "memory-item",
+      "label": "MemoryItem",
+      "kind": "class",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "memory-model",
+      "label": "Memory / App / User SQLAlchemy models",
+      "kind": "class",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "memory-search",
+      "label": "MemorySearch",
+      "kind": "class",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "memory-state",
+      "label": "MemoryState enum (active/paused/archived/deleted)",
+      "kind": "concept",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "memory-type-enum",
+      "label": "MemoryType enum",
+      "kind": "concept",
+      "pages": [
+        "config-system"
+      ]
+    },
+    {
+      "id": "mock-embeddings",
+      "label": "MockEmbeddings",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "neo4j-backend",
+      "label": "Neo4j graph backend (removed)",
+      "kind": "provider",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "neptune-graph-backend",
+      "label": "Amazon Neptune graph backend (removed)",
+      "kind": "provider",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "nextjs-dashboard",
+      "label": "Next.js 15 dashboard + Redux Toolkit store",
+      "kind": "module",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "normalize-bm25",
+      "label": "normalize_bm25 / get_bm25_params",
+      "kind": "algorithm",
+      "pages": [
+        "data-flow",
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "ollama-embedding",
+      "label": "OllamaEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "ollama-llm",
+      "label": "OllamaLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "openai-embedding",
+      "label": "OpenAIEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "openai-llm",
+      "label": "OpenAILLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "openai-predict",
+      "label": "OpenAIPredict",
+      "kind": "class",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "openai-structured-llm",
+      "label": "OpenAIStructuredLLM",
+      "kind": "provider",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "openclaw-mem0",
+      "label": "@mem0/openclaw-mem0 plugin",
+      "kind": "service",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "operator-sql-map",
+      "label": "OPERATOR_SQL_MAP (pgvector filter translation)",
+      "kind": "pattern",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "oss-memory-ts",
+      "label": "Memory (OSS engine)",
+      "kind": "class",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "output-data",
+      "label": "OutputData result shape",
+      "kind": "class",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "payload-model",
+      "label": "Memory payload model",
+      "kind": "concept",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "per-agent-isolation",
+      "label": "Per-agent isolation (session-key routing)",
+      "kind": "pattern",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "pgvector-filter-operators",
+      "label": "pgvector OPERATOR_SQL_MAP filters",
+      "kind": "algorithm",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "pgvector-store",
+      "label": "PGVector",
+      "kind": "provider",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "ping-validate",
+      "label": "/v1/ping/ API-key validation",
+      "kind": "service",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "platform-backend",
+      "label": "PlatformBackend",
+      "kind": "class",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "plugin-sync",
+      "label": "plugin_sync API key propagation",
+      "kind": "module",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "polyglot-monorepo",
+      "label": "Polyglot monorepo",
+      "kind": "concept",
+      "pages": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "procedural-memory-prompt",
+      "label": "PROCEDURAL_MEMORY_SYSTEM_PROMPT",
+      "kind": "pattern",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "project-config",
+      "label": "ProjectConfig",
+      "kind": "class",
+      "pages": [
+        "client-sdk"
+      ]
+    },
+    {
+      "id": "provider-factories-ts",
+      "label": "EmbedderFactory / LLMFactory / VectorStoreFactory / HistoryManagerFactory",
+      "kind": "pattern",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "provider-plugin-pattern",
+      "label": "Provider plugin pattern",
+      "kind": "pattern",
+      "pages": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "proxy-mem0",
+      "label": "Mem0 proxy (OpenAI-shaped chat wrapper)",
+      "kind": "class",
+      "pages": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "prune-request-logs",
+      "label": "prune_request_logs script",
+      "kind": "service",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "qdrant-store",
+      "label": "Qdrant default vector store (mem0_store)",
+      "kind": "provider",
+      "pages": [
+        "openmemory",
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "rag-manager",
+      "label": "RAGManager",
+      "kind": "class",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "rate-limiter",
+      "label": "slowapi rate limiter",
+      "kind": "service",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "recall-engine",
+      "label": "Token-budgeted recall",
+      "kind": "algorithm",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "redis-store",
+      "label": "RedisDB",
+      "kind": "provider",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "reference-skills",
+      "label": "Reference vs pipeline skills",
+      "kind": "concept",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "refresh-token-jti",
+      "label": "Single-use refresh tokens",
+      "kind": "pattern",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "relations-field",
+      "label": "relations field (removed)",
+      "kind": "concept",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "request-log-middleware",
+      "label": "Request logging middleware",
+      "kind": "pattern",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "rerank-score",
+      "label": "rerank_score",
+      "kind": "concept",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "rerank-stage",
+      "label": "Reranking stage",
+      "kind": "algorithm",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "reranker-config",
+      "label": "RerankerConfig",
+      "kind": "class",
+      "pages": [
+        "config-system",
+        "rerankers"
+      ]
+    },
+    {
+      "id": "reranker-factory",
+      "label": "RerankerFactory",
+      "kind": "class",
+      "pages": [
+        "architecture",
+        "config-system",
+        "rerankers"
+      ]
+    },
+    {
+      "id": "sanitize-relationship-for-cypher",
+      "label": "sanitize_relationship_for_cypher",
+      "kind": "concept",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "score-and-rank",
+      "label": "score_and_rank (additive fusion)",
+      "kind": "algorithm",
+      "pages": [
+        "data-flow",
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "score-fusion",
+      "label": "Multi-signal score fusion",
+      "kind": "algorithm",
+      "pages": [
+        "graph-memory"
+      ]
+    },
+    {
+      "id": "search-vector-store",
+      "label": "_search_vector_store multi-signal retrieval",
+      "kind": "algorithm",
+      "pages": [
+        "data-flow",
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "sentence-transformer-reranker",
+      "label": "SentenceTransformerReranker",
+      "kind": "provider",
+      "pages": [
+        "rerankers"
+      ]
+    },
+    {
+      "id": "server-state",
+      "label": "server_state runtime config",
+      "kind": "module",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "server-telemetry",
+      "label": "Anonymous PostHog telemetry",
+      "kind": "service",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "session-scoping",
+      "label": "Session scoping (user_id/agent_id/run_id/actor_id)",
+      "kind": "concept",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "setup-config",
+      "label": "setup_config / ~/.mem0",
+      "kind": "module",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "single-pass-add-only",
+      "label": "Single-pass ADD-only extraction",
+      "kind": "algorithm",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "single-pass-eval",
+      "label": "Single-pass retrieval (no agentic loops)",
+      "kind": "concept",
+      "pages": [
+        "evaluation"
+      ]
+    },
+    {
+      "id": "single-use-refresh-token",
+      "label": "Single-use refresh token via conditional UPDATE",
+      "kind": "pattern",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "spacy-models-loader",
+      "label": "spacy_models shared loader (get_nlp_full/get_nlp_lemma)",
+      "kind": "module",
+      "pages": [
+        "memory-algorithm"
+      ]
+    },
+    {
+      "id": "sqlite-manager",
+      "label": "SQLiteManager",
+      "kind": "class",
+      "pages": [
+        "data-flow",
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "stale-provider-counts",
+      "label": "Stale AGENTS.md provider counts",
+      "kind": "deprecation",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "streamable-http-transport",
+      "label": "Streamable HTTP / SSE MCP transports",
+      "kind": "interface",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "structured-exceptions",
+      "label": "Structured exceptions (exceptions.py)",
+      "kind": "module",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "structured-output",
+      "label": "Structured output / JSON mode",
+      "kind": "concept",
+      "pages": [
+        "llms"
+      ]
+    },
+    {
+      "id": "telemetry-sampling",
+      "label": "Telemetry sampling",
+      "kind": "concept",
+      "pages": [
+        "memory-engine"
+      ]
+    },
+    {
+      "id": "testing-cicd",
+      "label": "Testing & CI/CD pipeline",
+      "kind": "concept",
+      "pages": [
+        "architecture"
+      ]
+    },
+    {
+      "id": "threshold-before-fusion",
+      "label": "Threshold gates semantic score before fusion",
+      "kind": "gotcha",
+      "pages": [
+        "surprises"
+      ]
+    },
+    {
+      "id": "tsup-dual-build",
+      "label": "tsup CJS+ESM dual build",
+      "kind": "module",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "turbopuffer-store",
+      "label": "TurbopufferDB",
+      "kind": "provider",
+      "pages": [
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "upstream-error-classifier",
+      "label": "UpstreamError classifier",
+      "kind": "pattern",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "vector-store-autodetect",
+      "label": "Vector store auto-detection (get_default_memory_config)",
+      "kind": "pattern",
+      "pages": [
+        "openmemory"
+      ]
+    },
+    {
+      "id": "vector-store-base",
+      "label": "VectorStoreBase",
+      "kind": "interface",
+      "pages": [
+        "architecture",
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "vector-store-config",
+      "label": "VectorStoreConfig",
+      "kind": "class",
+      "pages": [
+        "config-system",
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "vector-store-factory",
+      "label": "VectorStoreFactory",
+      "kind": "class",
+      "pages": [
+        "architecture",
+        "config-system",
+        "vector-stores"
+      ]
+    },
+    {
+      "id": "vector-store-interface-ts",
+      "label": "VectorStore interface",
+      "kind": "interface",
+      "pages": [
+        "typescript-sdk"
+      ]
+    },
+    {
+      "id": "vercel-ai-provider",
+      "label": "@mem0/vercel-ai-provider",
+      "kind": "provider",
+      "pages": [
+        "integrations"
+      ]
+    },
+    {
+      "id": "verify-auth",
+      "label": "verify_auth / require_auth",
+      "kind": "pattern",
+      "pages": [
+        "server"
+      ]
+    },
+    {
+      "id": "vertexai-embedding",
+      "label": "VertexAIEmbedding",
+      "kind": "provider",
+      "pages": [
+        "embeddings"
+      ]
+    },
+    {
+      "id": "zero-entropy-reranker",
+      "label": "ZeroEntropyReranker",
+      "kind": "provider",
+      "pages": [
+        "rerankers"
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "from": "architecture",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "architecture",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "architecture",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "architecture",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "architecture",
+      "to": "rerankers",
+      "type": "uses"
+    },
+    {
+      "from": "architecture",
+      "to": "memory-algorithm",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "client-sdk",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "typescript-sdk",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "openmemory",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "integrations",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "evaluation",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "architecture",
+      "to": "memory",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "memory-client",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "memory-config",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "llm-factory",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "embedder-factory",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "vector-store-factory",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "reranker-factory",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "provider-plugin-pattern",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "load-class-lazy-import",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "vector-store-base",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "llm-base",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "embedding-base",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "base-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "polyglot-monorepo",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "proxy-mem0",
+      "type": "contains"
+    },
+    {
+      "from": "architecture",
+      "to": "testing-cicd",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "data-flow",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "data-flow",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "data-flow",
+      "to": "rerankers",
+      "type": "uses"
+    },
+    {
+      "from": "data-flow",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "data-flow",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "data-flow",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "data-flow",
+      "to": "memory-algorithm",
+      "type": "related"
+    },
+    {
+      "from": "data-flow",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "data-flow",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "data-flow",
+      "to": "add-to-vector-store",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "search-vector-store",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "score-and-rank",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "additive-extraction-prompt",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "memory-class",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "async-memory-class",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "sqlite-manager",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "entity-extraction",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "lemmatize-bm25",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "normalize-bm25",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "compute-entity-boosts",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "create-memory",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "build-filters-metadata",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "hash-dedup",
+      "type": "contains"
+    },
+    {
+      "from": "data-flow",
+      "to": "entity-store",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "memory-engine",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "memory-engine",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "memory-engine",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "memory-engine",
+      "to": "rerankers",
+      "type": "uses"
+    },
+    {
+      "from": "memory-engine",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "memory-engine",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "memory-engine",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "memory-engine",
+      "to": "memory-algorithm",
+      "type": "related"
+    },
+    {
+      "from": "memory-engine",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "memory-engine",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "memory-engine",
+      "to": "memory-class",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "async-memory-class",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "memory-base",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "sqlite-manager",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "build-filters-and-metadata",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "add-phased-pipeline",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "entity-store",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "anonymous-telemetry",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "memory-item",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "memory-config",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "session-scoping",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "infer-false-path",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "asyncio-to-thread",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "setup-config",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "structured-exceptions",
+      "type": "contains"
+    },
+    {
+      "from": "memory-engine",
+      "to": "telemetry-sampling",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "additive-extraction-prompt",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "single-pass-add-only",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "add-to-vector-store",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "score-and-rank",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "normalize-bm25",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "extract-entities",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "lemmatize-for-bm25",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "compute-entity-boosts",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "entity-store",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "spacy-models-loader",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "keyword-search-interface",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "agent-context-suffix",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "search-vector-store",
+      "type": "contains"
+    },
+    {
+      "from": "memory-algorithm",
+      "to": "procedural-memory-prompt",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "config-system",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "config-system",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "config-system",
+      "to": "rerankers",
+      "type": "uses"
+    },
+    {
+      "from": "config-system",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "config-system",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "config-system",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "config-system",
+      "to": "glossary",
+      "type": "related"
+    },
+    {
+      "from": "config-system",
+      "to": "memory-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "llm-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "embedder-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "vector-store-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "reranker-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "base-llm-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "base-embedder-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "llm-factory",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "embedder-factory",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "vector-store-factory",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "reranker-factory",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "load-class",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "memory-type-enum",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "azure-config",
+      "type": "contains"
+    },
+    {
+      "from": "config-system",
+      "to": "from-config",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "llms",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "llms",
+      "to": "embeddings",
+      "type": "related"
+    },
+    {
+      "from": "llms",
+      "to": "vector-stores",
+      "type": "related"
+    },
+    {
+      "from": "llms",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "llms",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "llms",
+      "to": "llm-base",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "base-llm-config",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "llm-factory",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "openai-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "anthropic-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "aws-bedrock-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "gemini-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "openai-structured-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "azure-openai-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "litellm-provider",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "langchain-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "ollama-llm",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "generate-response",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "structured-output",
+      "type": "contains"
+    },
+    {
+      "from": "llms",
+      "to": "extract-json",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "embeddings",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "embeddings",
+      "to": "llms",
+      "type": "related"
+    },
+    {
+      "from": "embeddings",
+      "to": "rerankers",
+      "type": "related"
+    },
+    {
+      "from": "embeddings",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "embeddings",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "embeddings",
+      "to": "embedding-base",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "base-embedder-config",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "embedder-config",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "embedder-factory",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "openai-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "azure-openai-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "google-genai-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "vertexai-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "huggingface-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "fastembed-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "ollama-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "langchain-embedding",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "mock-embeddings",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "memory-action",
+      "type": "contains"
+    },
+    {
+      "from": "embeddings",
+      "to": "embedding-dims-flow",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "vector-stores",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "vector-stores",
+      "to": "llms",
+      "type": "related"
+    },
+    {
+      "from": "vector-stores",
+      "to": "rerankers",
+      "type": "related"
+    },
+    {
+      "from": "vector-stores",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "vector-stores",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "vector-stores",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "vector-stores",
+      "to": "vector-store-base",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "vector-store-factory",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "vector-store-config",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "qdrant-store",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "pgvector-store",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "redis-store",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "faiss-store",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "turbopuffer-store",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "output-data",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "filter-dialect",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "keyword-search",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "payload-model",
+      "type": "contains"
+    },
+    {
+      "from": "vector-stores",
+      "to": "operator-sql-map",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "rerankers",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "rerankers",
+      "to": "vector-stores",
+      "type": "related"
+    },
+    {
+      "from": "rerankers",
+      "to": "embeddings",
+      "type": "related"
+    },
+    {
+      "from": "rerankers",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "rerankers",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "rerankers",
+      "to": "evaluation",
+      "type": "related"
+    },
+    {
+      "from": "rerankers",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "rerankers",
+      "to": "base-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "reranker-factory",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "cohere-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "sentence-transformer-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "huggingface-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "llm-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "zero-entropy-reranker",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "reranker-config",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "base-reranker-config",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "rerank-score",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "rerank-stage",
+      "type": "contains"
+    },
+    {
+      "from": "rerankers",
+      "to": "graceful-fallback",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "graph-memory",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "graph-memory",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "graph-memory",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "typescript-sdk",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "openmemory",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "client-sdk",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "evaluation",
+      "type": "related"
+    },
+    {
+      "from": "graph-memory",
+      "to": "graph-store-config",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "graph-memory",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "entity-linking",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "entity-store",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "entity-boost-weight",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "sanitize-relationship-for-cypher",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "neo4j-backend",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "memgraph-backend",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "kuzu-backend",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "apache-age-backend",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "neptune-graph-backend",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "score-fusion",
+      "type": "contains"
+    },
+    {
+      "from": "graph-memory",
+      "to": "relations-field",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "client-sdk",
+      "to": "rerankers",
+      "type": "uses"
+    },
+    {
+      "from": "client-sdk",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "client-sdk",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "typescript-sdk",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "client-sdk",
+      "to": "memory-client",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "async-memory-client",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "api-error-handler",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "memory-error-hierarchy",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "base-project",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "project-config",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "client-option-models",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "mem0-proxy",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "litellm-completion",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "capture-client-event",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "delete-linked",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "latest-only",
+      "type": "contains"
+    },
+    {
+      "from": "client-sdk",
+      "to": "ping-validate",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "memory-engine",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "data-flow",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "server",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "server",
+      "to": "openmemory",
+      "type": "related"
+    },
+    {
+      "from": "server",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "server",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "server",
+      "to": "fastapi-app-main",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "verify-auth",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "api-key-auth",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "refresh-token-jti",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "server-state",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "upstream-error-classifier",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "request-log-middleware",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "prune-request-logs",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "pgvector-filter-operators",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "alembic-migrations",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "make-bootstrap",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "rate-limiter",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "db-models",
+      "type": "contains"
+    },
+    {
+      "from": "server",
+      "to": "server-telemetry",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "client-sdk",
+      "type": "related"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "rerankers",
+      "type": "related"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "memory-client-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "oss-memory-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "add-to-vector-store-pipeline",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "entity-store-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "provider-factories-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "memory-error-hierarchy",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "vector-store-interface-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "llm-interface-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "embedder-interface-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "tsup-dual-build",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "camel-snake-translation",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "additive-extraction-prompt-ts",
+      "type": "contains"
+    },
+    {
+      "from": "typescript-sdk",
+      "to": "mem0-community-langchain",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "memory-engine",
+      "type": "uses"
+    },
+    {
+      "from": "openmemory",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "openmemory",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "openmemory",
+      "to": "llms",
+      "type": "uses"
+    },
+    {
+      "from": "openmemory",
+      "to": "embeddings",
+      "type": "uses"
+    },
+    {
+      "from": "openmemory",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "openmemory",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "openmemory",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "openmemory",
+      "to": "client-sdk",
+      "type": "related"
+    },
+    {
+      "from": "openmemory",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "openmemory",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "openmemory",
+      "to": "mcp-server",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "add-memories-tool",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "get-memory-client",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "memory-model",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "memory-state",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "check-memory-access-permissions",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "alembic-chain",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "categorization",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "vector-store-autodetect",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "config-router",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "backup-router",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "nextjs-dashboard",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "streamable-http-transport",
+      "type": "contains"
+    },
+    {
+      "from": "openmemory",
+      "to": "qdrant-store",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "client-sdk",
+      "type": "uses"
+    },
+    {
+      "from": "integrations",
+      "to": "memory-engine",
+      "type": "uses"
+    },
+    {
+      "from": "integrations",
+      "to": "config-system",
+      "type": "uses"
+    },
+    {
+      "from": "integrations",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "integrations",
+      "to": "typescript-sdk",
+      "type": "uses"
+    },
+    {
+      "from": "integrations",
+      "to": "vector-stores",
+      "type": "uses"
+    },
+    {
+      "from": "integrations",
+      "to": "openmemory",
+      "type": "related"
+    },
+    {
+      "from": "integrations",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "integrations",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "integrations",
+      "to": "mem0-cli-python",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "mem0-cli-node",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "agent-mode-bootstrap",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "platform-backend",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "mem0-plugin",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "mcp-tools",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "lifecycle-hooks",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "openclaw-mem0",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "recall-engine",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "filtering-pipeline",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "per-agent-isolation",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "dream-gate",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "vercel-ai-provider",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "reference-skills",
+      "type": "contains"
+    },
+    {
+      "from": "integrations",
+      "to": "plugin-sync",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "memory-algorithm",
+      "type": "uses"
+    },
+    {
+      "from": "evaluation",
+      "to": "client-sdk",
+      "type": "uses"
+    },
+    {
+      "from": "evaluation",
+      "to": "data-flow",
+      "type": "uses"
+    },
+    {
+      "from": "evaluation",
+      "to": "graph-memory",
+      "type": "uses"
+    },
+    {
+      "from": "evaluation",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "evaluation",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "evaluation",
+      "to": "surprises",
+      "type": "related"
+    },
+    {
+      "from": "evaluation",
+      "to": "experiment-runner",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "memory-add",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "memory-search",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "rag-manager",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "langmem-manager",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "openai-predict",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "llm-judge",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "evals",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "generate-scores",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "answer-prompts",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "locomo",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "beam",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "longmemeval",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "memory-benchmarks-repo",
+      "type": "contains"
+    },
+    {
+      "from": "evaluation",
+      "to": "single-pass-eval",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "memory-algorithm",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "data-flow",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "memory-engine",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "config-system",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "vector-stores",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "graph-memory",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "llms",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "embeddings",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "rerankers",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "server",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "client-sdk",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "openmemory",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "typescript-sdk",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "integrations",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "evaluation",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "architecture",
+      "type": "related"
+    },
+    {
+      "from": "surprises",
+      "to": "add-only-extraction",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "lazy-dotted-factory",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "threshold-before-fusion",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "entity-boost-attenuation",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "graph-memory-removed",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "keyword-search-none-sentinel",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "entity-param-asymmetry",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "import-time-pip-install",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "single-use-refresh-token",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "constant-time-login",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "stale-provider-counts",
+      "type": "contains"
+    },
+    {
+      "from": "surprises",
+      "to": "async-is-copy",
+      "type": "contains"
+    }
+  ]
+}

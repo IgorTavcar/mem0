@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The April-2026 (SDK v2.0.0/v3.0.0) rewrite of mem0&#x27;s memory pipeline: a single-pass ADD-only extractor (one LLM call, no UPDATE/DELETE, memories accumulate) and a multi-signal hybrid retriever that fuses dense semantic similarity, BM25 keyword matching over lemmatized text, and an entity-linking boost into one combined score. Extraction grounds relative time references to absolute dates so dated instances become independently retrievable, enabling temporal queries. Entity linking (the OSS replacement for graph memory) stores entities in a parallel vector collection and consumes them only as a retrieval boost. spaCy is an optional [nlp] extra; without it the system degrades to semantic-only.">
+<meta name="generator" content="mem0-wiki-build">
+<title>Memory Algorithm · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Memory Algorithm", "description": "The April-2026 (SDK v2.0.0/v3.0.0) rewrite of mem0's memory pipeline: a single-pass ADD-only extractor (one LLM call, no UPDATE/DELETE, memories accumulate) and a multi-signal hybrid retriever that fuses dense semantic similarity, BM25 keyword matching over lemmatized text, and an entity-linking boost into one combined score. Extraction grounds relative time references to absolute dates so dated instances become independently retrievable, enabling temporal queries. Entity linking (the OSS replacement for graph memory) stores entities in a parallel vector collection and consumes them only as a retrieval boost. spaCy is an optional [nlp] extra; without it the system degrades to semantic-only.", "keywords": "ADD-only extraction, single-pass memory algorithm, ADDITIVE_EXTRACTION_PROMPT, multi-signal hybrid retrieval, score fusion, score_and_rank, BM25 normalization sigmoid, lemmatize_for_bm25, entity linking, entity boost, _compute_entity_boosts, extract_entities spaCy", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html" class="active">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Core</span><span class="sep">/</span><span>Memory Algorithm</span></nav>
+    <h1>Memory Algorithm</h1>
+<p class="lead">The April-2026 (SDK v2.0.0 / v3.0.0) rewrite of mem0's memory pipeline replaces the old two-call extract-then-diff algorithm with a <strong>single-pass, ADD-only extractor</strong> and a <strong>multi-signal hybrid retriever</strong>. One LLM call extracts every distinct fact from a conversation; memories accumulate and nothing is overwritten or deleted. Retrieval fuses three independently-scored signals — dense semantic similarity, BM25 keyword matching over lemmatized text, and an entity-linking boost — into a single combined score. The benchmarked result is a ~20-26 point accuracy jump (LoCoMo 71.4 to 91.6, LongMemEval 67.8 to 93.4) at roughly 3-4x fewer tokens per operation.</p>
+
+<aside class="callout decision">
+<strong>Decision</strong> The previous algorithm spent one LLM call extracting candidate facts and a second deciding ADD/UPDATE/DELETE/NONE against existing state. The new algorithm collapses both into a single ADD-only call. The model spends its full capacity on <em>understanding the input</em> rather than diffing against stored memories — which is what drove the accuracy and token-cost wins. See <a href="evaluation.html">the benchmark results</a>.
+</aside>
+
+<section id="overview">
+<h2>Pipeline at a glance</h2>
+<p>Two halves: an <strong>add pipeline</strong> that extracts and persists facts, and a <strong>search pipeline</strong> that scores and fuses retrieval signals. Both live in <code>mem0/memory/main.py</code> on the <code>Memory</code> / <code>AsyncMemory</code> classes; the <a href="data-flow.html">end-to-end sequences</a> are documented separately, and the class plumbing (factories, history DB, telemetry) in <a href="memory-engine.html">the Memory Engine</a>.</p>
+
+<pre class="mermaid">flowchart TB
+  subgraph ADD["add — single-pass ADD-only"]
+    A1[Conversation messages] --> A2[Retrieve top-10 existing memories for dedup context]
+    A2 --> A3[ONE LLM call: ADDITIVE_EXTRACTION_PROMPT]
+    A3 --> A4[Batch embed extracted facts]
+    A4 --> A5[MD5 hash dedup]
+    A5 --> A6[Batch insert into vector store]
+    A6 --> A7[Batch entity extraction + linking]
+  end
+  subgraph SEARCH["search — multi-signal fusion"]
+    S1[Query] --> S2[Lemmatize + extract entities]
+    S2 --> S3a[Semantic vector search]
+    S2 --> S3b[BM25 keyword search]
+    S2 --> S3c[Entity-store boost]
+    S3a --> S4[score_and_rank fusion]
+    S3b --> S4
+    S3c --> S4
+    S4 --> S5[Top-K + optional rerank]
+  end</pre>
+</section>
+
+<section id="single-pass-add">
+<h2>Single-pass ADD-only extraction</h2>
+<p>One LLM call per <code>add()</code> turn extracts all distinct facts; every result carries <code>event: "ADD"</code>. There is no UPDATE, DELETE, or NONE path in the active pipeline.</p>
+
+<h3>The phased batch pipeline</h3>
+<p>The inference path is <code>Memory._add_to_vector_store(messages, metadata, filters, infer=True)</code>. It runs eight numbered phases:</p>
+<dl>
+<dt>Phase 0 — Context gathering</dt><dd>Loads up to 10 prior session messages via <code>db.get_last_messages(session_scope, limit=10)</code> and flattens the new turn with <code>parse_messages()</code>.</dd>
+<dt>Phase 1 — Existing-memory retrieval</dt><dd>Embeds the parsed conversation and runs a <code>vector_store.search(top_k=10)</code> scoped to <code>user_id</code>/<code>agent_id</code>/<code>run_id</code>. These memories are <em>context for deduplication and linking only</em> — they are never overwritten.</dd>
+<dt>Phase 2 — LLM extraction (single call)</dt><dd>System prompt is <code>ADDITIVE_EXTRACTION_PROMPT</code>; the user prompt is assembled by <code>generate_additive_extraction_prompt()</code>. Response is forced to <code>{"type": "json_object"}</code> and parsed for a <code>memory</code> array.</dd>
+<dt>Phase 3 — Batch embed</dt><dd><code>embedding_model.embed_batch(mem_texts, "add")</code> with per-text fallback on failure.</dd>
+<dt>Phase 4-5 — CPU processing + hash dedup</dt><dd>Each fact is lemmatized (<code>text_lemmatized</code>), MD5-hashed, and dropped if its hash already exists (either in the retrieved existing set or earlier in this same batch).</dd>
+<dt>Phase 6 — Batch persist</dt><dd>One <code>vector_store.insert(vectors, ids, payloads)</code> for all new facts, with a one-by-one fallback. A matching <code>batch_add_history()</code> records each as an <code>ADD</code> event in the SQLite history.</dd>
+<dt>Phase 7 — Batch entity linking</dt><dd>See <a href="memory-algorithm.html#entity-linking">entity linking</a> below.</dd>
+<dt>Phase 8 — Save messages + return</dt><dd>Raw messages are saved to the session store; results are returned as <code>{"id", "memory", "event": "ADD"}</code>.</dd>
+</dl>
+
+<aside class="callout insight">
+<strong>Insight — anti-hallucination ID mapping</strong> The retrieved existing memories are presented to the LLM with <em>sequential integer IDs</em> ("0", "1", ...), and a separate <code>uuid_mapping</code> dict maps those back to real UUIDs. The model never sees raw UUIDs in the dedup context, so it cannot fabricate or corrupt an identifier — it can only reference an index that the code resolves. The model's own output IDs ("0", "1", ...) are throwaway sequence numbers; persisted memories always get a fresh <code>uuid.uuid4()</code>.</aside>
+
+<h3>Why ADD-only — accumulation, not mutation</h3>
+<p>Information that changes is <strong>not</strong> reconciled at write time. The new fact is stored alongside the old one, and <em>retrieval ranking</em> is responsible for surfacing the current state. This is the central design bet of the rewrite:</p>
+<ul>
+<li><strong>Token efficiency</strong> — one extraction call instead of extract + diff. The published figure is under 7K tokens per retrieval vs 25K+ for full-context approaches, roughly 3-4x fewer tokens.</li>
+<li><strong>Accuracy</strong> — letting the model focus on comprehension rather than state-diffing yielded +20 (LoCoMo), +26 (LongMemEval), and a jump from 51% to 93% on temporal "where did I live before X" queries. See <a href="evaluation.html">Evaluation &amp; Benchmarks</a>.</li>
+<li><strong>No destructive edits</strong> — a bad diff decision can no longer delete a correct memory; the worst case is a redundant memory, which the downstream hash dedup and ranking absorb.</li>
+</ul>
+
+<aside class="callout gotcha">
+<strong>Gotcha</strong> <code>add()</code> now returns only <code>event: "ADD"</code>. Code that branched on <code>UPDATE</code> or <code>DELETE</code> events (pre-v3) will silently never hit those branches. The <code>custom_update_memory_prompt</code> config key is deprecated and ignored — use <code>custom_instructions</code> instead. (Per <code>docs/migration/oss-v2-to-v3.mdx</code>.)</aside>
+
+<details>
+<summary>Deep dive: the legacy two-call prompts still ship but are dormant</summary>
+<p><code>mem0/configs/prompts.py</code> still defines the old extraction prompt (<code>FACT_RETRIEVAL_PROMPT</code>, <code>USER_MEMORY_EXTRACTION_PROMPT</code>, <code>AGENT_MEMORY_EXTRACTION_PROMPT</code>) and the diff prompt (<code>DEFAULT_UPDATE_MEMORY_PROMPT</code> + <code>get_update_memory_messages()</code>). These are referenced only by <code>mem0/memory/utils.py</code> (<code>get_fact_retrieval_messages</code>, <code>get_fact_retrieval_messages_legacy</code>) and are <strong>not</strong> wired into the active <code>_add_to_vector_store</code> path, which exclusively uses <code>ADDITIVE_EXTRACTION_PROMPT</code>. Treat the legacy prompts as historical / unused by the OSS core add pipeline. <code>PROCEDURAL_MEMORY_SYSTEM_PROMPT</code> remains live for procedural memories.</p>
+</details>
+
+<h3>Non-inference and procedural paths</h3>
+<dl>
+<dt><code>infer=False</code></dt><dd>Skips the LLM entirely. Each non-system message is embedded and stored verbatim via <code>_create_memory()</code> (still lemmatized, still hashed, still an <code>ADD</code> history event).</dd>
+<dt><code>memory_type="procedural_memory"</code></dt><dd>Requires <code>agent_id</code>; routes to <code>_create_procedural_memory()</code>, which summarizes the agent's execution history using <code>PROCEDURAL_MEMORY_SYSTEM_PROMPT</code> and stores a single verbatim summary memory.</dd>
+</dl>
+</section>
+
+<section id="prompts">
+<h2>The extraction prompt</h2>
+<p>The active system prompt is <code>ADDITIVE_EXTRACTION_PROMPT</code> (ported from the platform's V3 prompt). Its role definition is explicit: <em>"Your sole operation is ADD."</em> Key behaviors encoded in the prompt:</p>
+<ul>
+<li><strong>Dual-source extraction</strong> — extract from BOTH user and assistant messages. User messages reveal personal facts; assistant messages contribute recommendations, plans, and researched facts (but echoes of what the user already said are skipped).</li>
+<li><strong>Contextually rich, not atomic</strong> — "User has a dog named Poppy and their morning walks are the highlight of their day", not "User has a dog". Transitions must capture old-and-new ("switched from almond milk to oat milk after an almond sensitivity").</li>
+<li><strong>Self-contained &amp; meaning-preserving</strong> — replace pronouns with names/"User"; preserve proper nouns, exact counts, titles. 15-80 words per memory.</li>
+<li><strong>Deduplication references</strong> — the prompt receives <em>Recently Extracted Memories</em> and <em>Existing Memories</em> sections so the model skips already-captured facts.</li>
+<li><strong>Memory linking</strong> — when a new fact relates to an existing one, the model emits the existing memory's real UUID in a <code>linked_memory_ids</code> array.</li>
+</ul>
+
+<h3>Agent-generated facts as first-class</h3>
+<p>The prompt and pipeline treat assistant/agent content as genuinely memorable. The dispatch helper <code>_should_use_agent_memory_extraction()</code> returns true when an <code>agent_id</code> is present and the turn contains assistant messages. When the add is <strong>agent-scoped</strong> (<code>agent_id</code> set, no <code>user_id</code>), the code appends <code>AGENT_CONTEXT_SUFFIX</code> to the system prompt, which reframes memories from the agent's perspective ("Agent learned that...", "Agent recommended..."). Every extracted memory also carries an <code>attributed_to</code> field ("user" or "assistant") that is promoted into the stored payload.</p>
+
+<aside class="callout insight">
+<strong>Insight</strong> Multi-speaker conversations are handled too: a named speaker in the "assistant" role (e.g. "Maria: I just got a cat named Bailey") has their personal facts extracted with full rigor and attributed by name. The benchmark for agent/assistant recall went from 46% to 100% under the new algorithm.</aside>
+
+<h3>Temporal grounding in the prompt</h3>
+<p>The prompt distinguishes two dates supplied by <code>generate_additive_extraction_prompt()</code>: <strong>Observation Date</strong> (when the conversation happened) and <strong>Current Date</strong> (today). Relative references ("yesterday", "last week", "next month") are resolved <em>only</em> against the Observation Date and rewritten to absolute dates, because "User went to Paris last week" is useless six months later while "the week of May 15, 2023" is meaningful forever. <code>_resolve_dates()</code> defaults both to today's UTC date when not provided.</p>
+</section>
+
+<section id="entity-linking">
+<h2>Entity extraction, embedding, and cross-memory linking</h2>
+<p>Entity linking is the OSS replacement for <a href="graph-memory.html">graph memory</a> (which was removed from the core, ~4000 lines deleted). Instead of an external graph DB, entities are stored in a parallel vector collection and consumed <em>indirectly</em> as a retrieval boost.</p>
+
+<h3>Extraction — spaCy, four entity types</h3>
+<p><code>mem0/utils/entity_extraction.py</code> exposes <code>extract_entities(text)</code> and a batched <code>extract_entities_batch(texts)</code> (using spaCy's <code>nlp.pipe()</code>). It produces deduplicated <code>(entity_type, entity_text)</code> tuples of four types:</p>
+<dl>
+<dt>PROPER</dt><dd>Capitalized multi-word sequences with a mid-sequence capital (person names, places, brands).</dd>
+<dt>QUOTED</dt><dd>Single- or double-quoted spans (titles, specific terms) longer than 2 chars.</dd>
+<dt>COMPOUND</dt><dd>Multi-word noun phrases from <code>doc.noun_chunks</code>, lemmatizing noun heads, with extensive filtering of generic heads (<code>_GENERIC_HEADS</code>), non-specific adjectives (<code>_NON_SPECIFIC_ADJ</code>), and generic endings.</dd>
+<dt>NOUN</dt><dd>Single-noun fallback from circumstantial compound patterns (e.g. "solo trip" to "trip").</dd>
+</dl>
+<p>A type-priority pass keeps the best type per surface form (PROPER &gt; COMPOUND &gt; QUOTED &gt; NOUN), and a final substring pass drops entities fully contained in a longer entity. If spaCy is unavailable, <code>extract_entities</code> returns <code>[]</code> — entity linking silently degrades to off.</p>
+
+<h3>Linking — the parallel entity store</h3>
+<p>The entity store is a lazily-created vector collection named <code>{collection_name}_entities</code> (the <code>entity_store</code> property in <code>main.py</code> clones the main vector-store config and renames the collection; for Qdrant embedded mode it shares the client to avoid RocksDB lock contention). During add Phase 7, <code>_add_to_vector_store</code>:</p>
+<ol>
+<li>Batch-extracts entities for all new memory texts.</li>
+<li><strong>Globally dedups</strong> entities across the batch by normalized lowercase key, tracking which memory IDs each entity appears in.</li>
+<li>Batch-embeds the unique entity texts.</li>
+<li><code>entity_store.search_batch(top_k=1)</code> to find existing entities; a match at <strong>score &gt;= 0.95</strong> is treated as the same entity, and the new memory IDs are merged into its <code>linked_memory_ids</code>. Otherwise a new entity record is created.</li>
+<li>One batch insert for all genuinely-new entities.</li>
+</ol>
+<p>So an entity record is effectively an adjacency list: one entity text mapping to every memory it appears in. This is the "graph" — built implicitly, consumed only at search time.</p>
+
+<aside class="callout perf">
+<strong>Perf</strong> Both the add and search entity paths are aggressively batched: <code>embed_batch</code> for facts and entities, <code>search_batch</code> for entity matching, and a single <code>insert</code>/<code>batch_add_history</code> per turn. <code>AsyncMemory</code> wraps the CPU-bound spaCy calls in <code>asyncio.to_thread</code> so they don't block the event loop.</aside>
+</section>
+
+<section id="multi-signal-retrieval">
+<h2>Multi-signal retrieval and score fusion</h2>
+<p>Search is implemented in <code>Memory._search_vector_store(query, filters, limit, threshold)</code>, called from the public <code>search()</code>. It computes three signals in parallel and fuses them additively.</p>
+
+<pre class="mermaid">flowchart LR
+  Q[Query] --> L[lemmatize_for_bm25]
+  Q --> E[extract_entities]
+  Q --> V[embed]
+  V --> SEM["vector_store.search<br/>internal_limit = max of 4*top_k and 60"]
+  L --> KW["vector_store.keyword_search<br/>BM25 sparse"]
+  E --> EB["_compute_entity_boosts<br/>entity_store search"]
+  KW --> NB["normalize_bm25<br/>sigmoid to 0..1"]
+  SEM --> SR["score_and_rank"]
+  NB --> SR
+  EB --> SR
+  SR --> OUT["Top-K MemoryItem list"]
+  OUT --> RR["optional reranker.rerank"]</pre>
+
+<h3>The three signals</h3>
+<dl>
+<dt>1. Semantic (dense vector)</dt><dd>The query is embedded and searched against the main collection with an over-fetched pool: <code>internal_limit = max(limit * 4, 60)</code>. The candidate's similarity becomes <code>semantic_score</code>. This is the only mandatory signal and the only one gated by <code>threshold</code>.</dd>
+<dt>2. BM25 keyword</dt><dd>The query is lemmatized (<code>lemmatize_for_bm25</code>) and passed to <code>vector_store.keyword_search()</code>. Raw BM25 scores are normalized to [0,1] via <code>normalize_bm25</code>. If the store doesn't support keyword search, <code>keyword_search</code> returns <code>None</code> and the signal is simply absent.</dd>
+<dt>3. Entity matching</dt><dd>Query entities are embedded and matched against the entity store; matched entities propagate a bounded boost to their linked memories via <code>_compute_entity_boosts</code>.</dd>
+</dl>
+
+<h3>BM25 normalization — query-length-adaptive sigmoid</h3>
+<p>Raw BM25 scores are unbounded and grow with query length, so <code>mem0/utils/scoring.py</code> maps them through a logistic sigmoid whose midpoint/steepness adapt to the number of lemmatized terms (<code>get_bm25_params</code>):</p>
+<pre><code class="language-python">def normalize_bm25(raw_score, midpoint, steepness):
+    return 1.0 / (1.0 + math.exp(-steepness * (raw_score - midpoint)))
+
+# get_bm25_params by lemmatized term count:
+#   <= 3 terms -> (5.0, 0.7)      7..9 terms  -> (9.0, 0.5)
+#   4..6 terms -> (7.0, 0.6)     10..15 terms -> (10.0, 0.5)
+#   > 15 terms -> (12.0, 0.5)</code></pre>
+
+<h3>Lemmatization for keyword matching</h3>
+<p><code>mem0/utils/lemmatization.py</code> normalizes verb forms, comparatives, and plurals (attending/attends/attended to attend; memories to memory) using a lemmatizer-only spaCy pipeline. It also <em>appends the original -ing form</em> alongside the lemma to absorb noun/verb ambiguity ("meeting" vs "meet"). Stored memories are lemmatized at write time into <code>text_lemmatized</code>; queries are lemmatized at search time so both sides of BM25 share a vocabulary. Without spaCy, it falls back to the raw text.</p>
+
+<aside class="callout gotcha">
+<strong>Gotcha — cross-language collection</strong> The Python SDK writes the lemmatized field as <code>text_lemmatized</code> (snake_case); the <a href="typescript-sdk.html">TypeScript SDK</a> writes <code>textLemmatized</code> (camelCase). If a Qdrant collection is shared between the two SDKs, lemma-based BM25 will not resolve across languages — keep collections language-scoped.</aside>
+
+<h3>Entity boost — spread attenuation</h3>
+<p><code>_compute_entity_boosts(query_entities, filters)</code> dedups query entities (max 8), embeds each, and searches the entity store with <code>top_k=500</code>. Only matches with similarity &gt;= 0.5 contribute. The boost for a matched entity is attenuated by how many memories it links to, so a hyper-connected entity (e.g. the user's own name) doesn't dominate:</p>
+<pre><code class="language-python">num_linked = max(len(linked_memory_ids), 1)
+memory_count_weight = 1.0 / (1.0 + 0.001 * ((num_linked - 1) ** 2))
+boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight   # ENTITY_BOOST_WEIGHT = 0.5
+# each linked memory takes the MAX boost across all matching entities
+memory_boosts[mem_id] = max(memory_boosts.get(mem_id, 0.0), boost)</code></pre>
+<p>The boost is therefore capped at 0.5 and shrinks quadratically with link count.</p>
+
+<h3>Fusion — additive scoring with an adaptive divisor</h3>
+<p><code>score_and_rank(semantic_results, bm25_scores, entity_boosts, threshold, top_k)</code> performs the actual fusion. The threshold gates the <strong>semantic score before combining</strong> — a candidate below threshold is dropped even if BM25/entity would have boosted it. The combined score is a sum normalized by an adaptive <code>max_possible</code> divisor that reflects which signals are active:</p>
+<pre><code class="language-python">max_possible = 1.0
+if has_bm25:   max_possible += 1.0          # semantic + bm25 -> 2.0
+if has_entity: max_possible += 0.5          # + entity        -> 2.5
+
+# per candidate:
+if semantic_score < threshold: continue     # threshold gates semantic ONLY
+raw_combined = semantic_score + bm25_score + entity_boost
+combined = min(raw_combined / max_possible, 1.0)</code></pre>
+<table>
+<thead><tr><th>Active signals</th><th>max_possible divisor</th></tr></thead>
+<tbody>
+<tr><td>Semantic only</td><td>1.0</td></tr>
+<tr><td>Semantic + BM25</td><td>2.0</td></tr>
+<tr><td>Semantic + BM25 + entity</td><td>2.5</td></tr>
+<tr><td>Semantic + entity (no BM25)</td><td>1.5</td></tr>
+</tbody>
+</table>
+<p>Candidates are sorted by the combined score descending and truncated to <code>top_k</code>. The combined value lands on each result's <code>score</code> field.</p>
+
+<aside class="callout insight">
+<strong>Insight — the divisor keeps scores comparable</strong> Because the normalizer adapts to <em>which signals fired</em> (not a fixed weighting), a semantic-only store and a full hybrid store both produce scores in the same [0,1] range. A memory that scores 0.9 semantically alone and one that scores 0.9 across three fused signals are directly comparable — the entity/BM25 contributions are additive bonuses, never a re-weighting of the baseline semantic relevance.</aside>
+
+<h3>Reranking sits on top</h3>
+<p>If <code>search(rerank=True)</code> and a reranker is configured, <code>reranker.rerank(query, original_memories, limit)</code> runs <em>after</em> fusion and re-orders the fused top-K. Reranking failures are caught and the fused order is used as fallback. See <a href="rerankers.html">Rerankers</a> for where this fits.</p>
+</section>
+
+<section id="temporal-reasoning">
+<h2>Temporal reasoning</h2>
+<p>Temporal handling is primarily an <strong>extraction-time</strong> concern, not a separate ranking stage. Because facts are grounded to absolute dates during extraction (Observation Date resolution in <code>ADDITIVE_EXTRACTION_PROMPT</code>), dated instances become independent, individually-retrievable memories rather than a single mutated value.</p>
+<ul>
+<li>"I moved to SF in 2021, then to Austin in 2023" produces two separate, absolutely-dated memories — neither overwrites the other (ADD-only).</li>
+<li>A query like "where did I live before SF?" can therefore match the <em>past</em> instance directly via semantic + entity signals, instead of finding only the current-state value. This is exactly the case the benchmarks measured rising from 51% to 93%.</li>
+<li>Every stored memory carries <code>created_at</code> / <code>updated_at</code> ISO-8601 UTC timestamps (set in <code>_create_memory</code> / the batch payload builder and normalized by <code>_normalize_iso_timestamp_to_utc</code>), available for downstream metadata filtering and for callers that want explicit recency ordering.</li>
+</ul>
+<aside class="callout insight">
+<strong>Insight</strong> The temporal win is a <em>consequence</em> of the ADD-only design plus absolute-date grounding, not a dedicated time-decay ranking function. Current-state vs past vs upcoming queries are disambiguated by the dates baked into each memory's text and resolved by the LLM at extraction time, then surfaced by ordinary multi-signal retrieval.</aside>
+</section>
+
+<section id="nlp-extra">
+<h2>The optional [nlp] extra and spaCy model</h2>
+<p>Entity extraction and BM25 lemmatization both depend on spaCy, which is an <strong>optional</strong> dependency, not a core one. <code>pyproject.toml</code> declares:</p>
+<pre><code class="language-bash"># entity linking + BM25 lemmatization
+pip install "mem0ai[nlp]"     # installs spacy>=3.7.0
+
+# Qdrant users also need fastembed to enable BM25 sparse vectors
+pip install fastembed</code></pre>
+<p><code>mem0/utils/spacy_models.py</code> is the shared, thread-safe loader. It lazily loads two pipelines so entity extraction and lemmatization share one on-disk model instance:</p>
+<dl>
+<dt><code>get_nlp_full()</code></dt><dd>Full pipeline (NER, tagger, parser) for entity extraction.</dd>
+<dt><code>get_nlp_lemma()</code></dt><dd>Lemmatizer-only (<code>disable=["ner", "parser"]</code>) for BM25.</dd>
+</dl>
+<p><code>_ensure_model_available()</code> auto-downloads <code>en_core_web_sm</code> on first use if spaCy is installed but the model is missing (or instructs <code>python -m spacy download en_core_web_sm</code> on failure). If spaCy itself is absent, both loaders set a sticky failure flag and return <code>None</code>.</p>
+<aside class="callout decision">
+<strong>Graceful degradation</strong> Without the <code>[nlp]</code> extra, mem0 still works — <code>extract_entities</code> returns <code>[]</code> (no entity linking, no entity boost) and <code>lemmatize_for_bm25</code> returns the raw text. Retrieval falls back to semantic-only with <code>max_possible = 1.0</code>. The Qdrant backend additionally logs <code>"fastembed not installed — BM25 keyword search disabled"</code> on first search and skips the BM25 signal.</aside>
+</section>
+
+<section id="store-support">
+<h2>Vector-store support for the algorithm</h2>
+<p>The hybrid retriever leans on a single optional method on the <a href="vector-stores.html#interface">vector store interface</a>: <code>keyword_search(query, top_k, filters)</code>. The base class (<code>mem0/vector_stores/base.py</code>) returns <code>None</code> (unsupported) by default; stores that support native full-text / BM25 override it. Backends that implement it include Qdrant, Elasticsearch, OpenSearch, pgvector, Pinecone, Milvus, Weaviate, Redis, MongoDB, Databricks, Azure (AI Search + MySQL), Vertex AI, Baidu, and Upstash. The entity store is just a second collection in the <em>same</em> backend, so no extra infrastructure is needed.</p>
+<aside class="callout gotcha">
+<strong>Gotcha</strong> Qdrant is unique in encoding sparse BM25 vectors <em>alongside</em> dense vectors in one collection via <code>fastembed</code> (queried with <code>using="bm25"</code>). Other stores use their own native full-text indexes. Either way, if the store cannot do keyword search the algorithm simply drops the BM25 term — no error, scores just renormalize.</aside>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li class="conn-empty">—</li></ul></div><div><h4>Used by</h4><ul><li><a href="client-sdk.html">Hosted Client &amp; Proxy</a></li><li><a href="data-flow.html">Data Flow</a></li><li><a href="evaluation.html">Evaluation &amp; Benchmarks</a></li><li><a href="graph-memory.html">Graph Memory (deprecated)</a></li><li><a href="integrations.html">Integrations &amp; Ecosystem</a></li><li><a href="llms.html">LLM Providers</a></li><li><a href="memory-engine.html">Memory Engine</a></li><li><a href="openmemory.html">OpenMemory Platform</a></li><li><a href="server.html">Self-Hosted Server</a></li><li><a href="typescript-sdk.html">TypeScript SDK</a></li></ul></div><div><h4>Related</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li></ul></div><div><h4>Source files</h4><ul><li><code>mem0/configs/prompts.py</code> — Active V3 ADD-only system prompt, generate_additive_extraction_prompt builder, AGENT_CONTEXT_SUFFIX, and dormant legacy prompts (FACT_RETRIEVAL_PROMPT, DEFAULT_UPDATE_MEMORY_PROMPT, PROCEDURAL_MEMORY_SYSTEM_PROMPT)</li><li><code>mem0/memory/main.py</code> — Eight-phase ADD-only add pipeline: existing-memory retrieval with integer ID mapping, single LLM call, batch embed, MD5 hash dedup, batch insert, batch entity linking</li><li><code>mem0/memory/main.py</code> — Multi-signal retrieval: lemmatize+entity preprocess, over-fetch semantic, keyword_search BM25, entity-store boost with spread attenuation, fusion via score_and_rank; lazy {collection}_entities store</li><li><code>mem0/utils/scoring.py</code> — Additive score fusion with adaptive max_possible divisor (1.0/1.5/2.0/2.5), threshold gates semantic only; normalize_bm25 sigmoid; get_bm25_params query-length-adaptive params; ENTITY_BOOST_WEIGHT=0.5</li><li><code>mem0/utils/entity_extraction.py</code> — spaCy-based extraction of PROPER/QUOTED/COMPOUND/NOUN entities with generic-head/adjective filtering, type-priority dedup, substring removal; returns [] if spaCy unavailable</li><li><code>mem0/utils/lemmatization.py</code> — Lemmatizer-only spaCy pipeline; drops stopwords/punct, keeps lemmas, also appends original -ing forms for noun/verb ambiguity; falls back to raw text</li><li><code>mem0/utils/spacy_models.py</code> — Thread-safe shared loader; auto-downloads en_core_web_sm; full pipeline for NER vs lemmatizer-only (disable ner,parser); sticky failure flags on missing spaCy</li><li><code>mem0/vector_stores/base.py</code> — Optional keyword_search returns None (unsupported) by default; overridden by stores with native BM25/full-text. Qdrant uses fastembed sparse vectors using=&#x27;bm25&#x27;</li><li><code>pyproject.toml</code> — spacy&gt;=3.7.0 is an optional [nlp] extra, not a core dependency</li><li><code>docs/migration/oss-v2-to-v3.mdx</code> — Documents single-pass ADD-only rationale, accumulation model, graph-memory removal -&gt; entity linking, deprecated custom_update_memory_prompt, ~3-4x token reduction</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

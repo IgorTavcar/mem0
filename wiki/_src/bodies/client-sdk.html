@@ -1,0 +1,519 @@
+<h1>Hosted Client &amp; Proxy</h1>
+<p class="lead">
+  <code>mem0.client.main</code> ships two thin HTTP clients —
+  <code>MemoryClient</code> (sync, on <code>httpx.Client</code>) and
+  <code>AsyncMemoryClient</code> (async, on <code>httpx.AsyncClient</code>) — that talk to the
+  hosted Mem0 platform at <code>https://api.mem0.ai</code>. They expose the same memory verbs as the
+  <a href="memory-engine.html">self-hosted engine</a> (add / search / get / get_all / update / delete /
+  history / users / batch / feedback / export) but run zero local LLM, embedding, or vector-store code —
+  all extraction and retrieval happens server-side. Alongside them, <code>mem0.client.project</code>
+  manages organizations/projects/members, and <code>mem0.proxy.main</code> wraps an OpenAI-compatible
+  chat completion to transparently retrieve relevant memories and write new ones around each call.
+</p>
+
+<section id="overview">
+  <h2>Where this fits</h2>
+  <p>
+    mem0 has <a href="architecture.html">two usage modes</a>: the OSS engine you run yourself, and the
+    hosted platform you call over HTTP. This page covers the hosted side and the LLM proxy. The clients
+    are intentionally dumb — they marshal arguments, POST/GET/PUT/DELETE JSON, raise structured errors,
+    and emit telemetry. Everything intelligent (fact extraction, the
+    <a href="memory-algorithm.html">retrieval algorithm</a>, vector indexing, graph/entity linking)
+    lives behind the API.
+  </p>
+  <dl>
+    <dt>Files</dt>
+    <dd>
+      <code>mem0/client/main.py</code> (both clients), <code>mem0/client/project.py</code>
+      (project/member management), <code>mem0/client/types.py</code> (Pydantic option models),
+      <code>mem0/client/utils.py</code> (the <code>api_error_handler</code> decorator),
+      <code>mem0/proxy/main.py</code> (the chat-completion proxy). <code>mem0/exceptions.py</code> defines
+      the structured exception hierarchy. Both clients are re-exported from <code>mem0/__init__.py</code>
+      as <code>from mem0.client.main import AsyncMemoryClient, MemoryClient</code>.
+    </dd>
+    <dt>Auth</dt>
+    <dd>
+      API key from the <code>api_key</code> argument or the <code>MEM0_API_KEY</code> environment variable;
+      a missing key raises <code>ValueError("Mem0 API Key not provided...")</code> at construction.
+    </dd>
+  </dl>
+  <aside class="callout decision">
+    <strong>Decision</strong> The hosted client is a separate, dependency-light surface (only
+    <code>httpx</code> + <code>requests</code> + <code>pydantic</code>) — it does <em>not</em> import the
+    OSS <code>Memory</code> engine, its providers, or any vector store. Importing
+    <code>MemoryClient</code> pulls in none of the LLM/embedding stack, which is why a hosted-only install
+    stays small.
+  </aside>
+</section>
+
+<section id="construction-auth">
+  <h2>Construction, auth, and identity resolution</h2>
+  <p>
+    Both clients share the same <code>__init__</code> shape:
+    <code>MemoryClient(api_key=None, host=None, client=None)</code>.
+  </p>
+  <ul>
+    <li><strong>host</strong> defaults to <code>"https://api.mem0.ai"</code>; overridable for self-hosted
+      platform deployments or testing.</li>
+    <li><strong>client</strong> lets you inject a pre-built <code>httpx.Client</code> /
+      <code>httpx.AsyncClient</code> (e.g. for custom transports, proxies, mocking). When passed, the
+      client's <code>base_url</code> and auth headers are <em>overwritten</em> to the correct values.</li>
+    <li>When no client is injected, a fresh one is created with a <strong>300-second timeout</strong> and
+      headers <code>Authorization: Token &lt;api_key&gt;</code> and <code>Mem0-User-ID: &lt;hash&gt;</code>.</li>
+  </ul>
+
+  <h3>The <code>Mem0-User-ID</code> header</h3>
+  <p>
+    <code>user_id</code> is initially seeded from <code>get_user_id()</code> (the OSS anon-id) but is then
+    <em>overwritten</em> with the MD5 hash of the API key:
+    <code>hashlib.md5(self.api_key.encode()).hexdigest()</code>. This deterministic hash is sent as the
+    <code>Mem0-User-ID</code> header on every request — it identifies the caller for telemetry/correlation
+    without exposing the raw key.
+  </p>
+
+  <h3>API-key validation &amp; org/project resolution</h3>
+  <p>
+    <code>_validate_api_key()</code> runs at construction and does double duty:
+  </p>
+  <ol>
+    <li>It hits <code>GET /v1/ping/</code>. A non-2xx response surfaces the server's
+      <code>detail</code> field as a <code>ValueError("Error: ...")</code> — so a bad key fails fast at
+      construction, not on first real call.</li>
+    <li>The ping response carries <code>org_id</code>, <code>project_id</code>, and
+      <code>user_email</code>. When present, <code>org_id</code>/<code>project_id</code> are stored on the
+      instance and become the scope for project-management calls; <code>user_email</code> is stored for
+      telemetry.</li>
+  </ol>
+  <aside class="callout gotcha">
+    <strong>Gotcha</strong> <code>AsyncMemoryClient._validate_api_key()</code> is a <em>synchronous</em>
+    method using the blocking <code>requests</code> library, called directly inside <code>__init__</code>.
+    The async client therefore does one blocking network round-trip at construction time. Only subsequent
+    memory operations use the non-blocking <code>httpx.AsyncClient</code>.
+  </aside>
+  <aside class="callout insight">
+    <strong>Insight</strong> <code>org_id</code> / <code>project_id</code> are resolved from the API key
+    server-side, not injected into request params. <code>MemoryClient._prepare_params()</code> deliberately
+    does <em>not</em> add them (see the in-code comment "org_id and project_id are resolved from API key —
+    not injected into params"). Only the <code>Project</code> manager (<code>project.py</code>) puts them in
+    the URL/query, because those endpoints are org/project-scoped by path.
+  </aside>
+
+  <h3>Anonymous-ID aliasing</h3>
+  <p>
+    On init, <code>_maybe_alias_anon_to_email(self.user_email)</code> fires PostHog <code>$identify</code>
+    events so a user's prior anonymous OSS/CLI telemetry IDs (read via <code>read_anon_ids()</code>) get
+    merged into their resolved email. It is idempotent (guarded by <code>is_aliased</code> /
+    <code>mark_aliased</code>), best-effort, and never raises. See
+    <a href="memory-engine.html#telemetry">telemetry</a> for the OSS side.
+  </p>
+
+  <pre><code class="language-python">from mem0 import MemoryClient, AsyncMemoryClient
+
+client = MemoryClient()                 # reads MEM0_API_KEY
+client = MemoryClient(api_key="m0-...") # explicit
+
+# Async: validation is sync, but ops are awaited; supports async context manager
+async with AsyncMemoryClient() as ac:
+    await ac.add("I love sci-fi movies", user_id="alice")</code></pre>
+  <p>
+    Only <code>AsyncMemoryClient</code> implements <code>__aenter__</code>/<code>__aexit__</code>; exiting
+    the context calls <code>await self.async_client.aclose()</code>. The sync client has no context manager
+    and no explicit close.
+  </p>
+</section>
+
+<section id="memory-methods">
+  <h2>Memory methods (the public surface)</h2>
+  <p>
+    Every public method is wrapped in <code>@api_error_handler</code> (see
+    <a href="#error-handling">error handling</a>) and ends by emitting a <code>capture_client_event(...)</code>
+    telemetry call. The async client mirrors each method 1:1 with <code>async</code>/<code>await</code> and
+    a <code>"sync_type": "async"</code> telemetry tag. The table lists what actually exists in
+    <code>main.py</code>.
+  </p>
+
+  <table>
+    <thead>
+      <tr><th>Method</th><th>HTTP</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>add(messages, options=None, **kwargs)</code></td><td>POST <code>/v3/memories/add/</code></td><td>Accepts a <code>str</code>, a single <code>dict</code>, or a <code>list[dict]</code>; a bare string becomes <code>[{"role":"user","content":...}]</code>. Other types raise <code>ValueError</code>.</td></tr>
+      <tr><td><code>get(memory_id)</code></td><td>GET <code>/v1/memories/{id}/</code></td><td>Single memory by ID.</td></tr>
+      <tr><td><code>get_all(options=None, **kwargs)</code></td><td>POST <code>/v3/memories/</code></td><td>Paginated; returns <code>{count, next, previous, results}</code>. <code>page</code>/<code>page_size</code> become query params, the rest is the JSON filter body.</td></tr>
+      <tr><td><code>search(query, options=None, **kwargs)</code></td><td>POST <code>/v3/memories/search/</code></td><td>Body is <code>{"query": query, ...params}</code>; returns v1.1 <code>{"results": [...]}</code>.</td></tr>
+      <tr><td><code>update(memory_id, options=None, **kwargs)</code></td><td>PUT <code>/v1/memories/{id}/</code></td><td>Requires at least one of <code>text</code>/<code>metadata</code>/<code>timestamp</code>, else <code>ValueError</code>.</td></tr>
+      <tr><td><code>delete(memory_id, delete_linked=False)</code></td><td>DELETE <code>/v1/memories/{id}/</code></td><td>See <a href="#delete-linked">delete_linked</a>.</td></tr>
+      <tr><td><code>delete_all(options=None, **kwargs)</code></td><td>DELETE <code>/v1/memories/</code></td><td>Filtered bulk delete.</td></tr>
+      <tr><td><code>history(memory_id)</code></td><td>GET <code>/v1/memories/{id}/history/</code></td><td>Returns a <code>list</code> of change events.</td></tr>
+      <tr><td><code>users()</code></td><td>GET <code>/v1/entities/</code></td><td>All users/agents/apps/runs with memories.</td></tr>
+      <tr><td><code>delete_users(user_id=, agent_id=, app_id=, run_id=)</code></td><td>DELETE <code>/v2/entities/{type}/{name}/</code></td><td>Deletes one entity by kind, or <em>all</em> entities (loops over <code>users()</code>) if no arg given.</td></tr>
+      <tr><td><code>reset()</code></td><td>—</td><td>Convenience: calls <code>delete_users()</code> with no args (wipes everything).</td></tr>
+      <tr><td><code>batch_update(memories)</code></td><td>PUT <code>/v1/batch/</code></td><td>List of <code>{memory_id, text?, metadata?}</code>.</td></tr>
+      <tr><td><code>batch_delete(memories)</code></td><td>DELETE <code>/v1/batch/</code></td><td>List of <code>{memory_id}</code>; uses <code>client.request("DELETE", ...)</code> because DELETE-with-body.</td></tr>
+      <tr><td><code>create_memory_export(schema, **kwargs)</code></td><td>POST <code>/v1/exports/</code></td><td>Kick off a structured export against a JSON schema.</td></tr>
+      <tr><td><code>get_memory_export(**kwargs)</code></td><td>POST <code>/v1/exports/get/</code></td><td>Fetch a completed export.</td></tr>
+      <tr><td><code>get_summary(filters=None)</code></td><td>POST <code>/v1/summary/</code></td><td>Summary of memories for a filter scope.</td></tr>
+      <tr><td><code>feedback(memory_id, feedback=None, feedback_reason=None)</code></td><td>POST <code>/v1/feedback/</code></td><td>Records relevance feedback; see <a href="#feedback">feedback</a>.</td></tr>
+      <tr><td><code>get_webhooks(project_id)</code></td><td>GET <code>api/v1/webhooks/projects/{id}/</code></td><td>List webhooks.</td></tr>
+      <tr><td><code>create_webhook(url, name, project_id, event_types)</code></td><td>POST <code>api/v1/webhooks/projects/{id}/</code></td><td>Create a webhook.</td></tr>
+      <tr><td><code>update_webhook(webhook_id, name=, url=, event_types=)</code></td><td>PUT <code>api/v1/webhooks/{id}/</code></td><td>Patch a webhook.</td></tr>
+      <tr><td><code>delete_webhook(webhook_id)</code></td><td>DELETE <code>api/v1/webhooks/{id}/</code></td><td>Remove a webhook.</td></tr>
+      <tr><td><code>get_project(fields=None)</code> / <code>update_project(...)</code></td><td>GET/PATCH org/project path</td><td><strong>Deprecated</strong> — see <a href="#projects">project API</a>.</td></tr>
+      <tr><td><code>chat()</code></td><td>—</td><td>Always raises <code>NotImplementedError("Chat is not implemented yet")</code>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 id="entity-params">Entity params must go inside <code>filters</code></h3>
+  <p>
+    The v3 API does not accept identity fields at the top level. <code>search()</code> and
+    <code>get_all()</code> enforce this client-side: a module-level
+    <code>ENTITY_PARAMS = {"user_id","agent_id","app_id","run_id"}</code> is intersected with the kwargs,
+    and any hit raises a <code>ValueError</code> telling you to use
+    <code>filters={'user_id': '...'}</code> instead.
+  </p>
+  <aside class="callout gotcha">
+    <strong>Gotcha — asymmetry</strong> This guard fires only on <code>search</code> and
+    <code>get_all</code>. <code>add()</code> and <code>delete_all()</code> do <em>not</em> reject top-level
+    <code>user_id</code> — the proxy and many examples still pass <code>user_id=</code> straight to
+    <code>add()</code>. So the same kwarg is accepted on writes but rejected on reads.
+  </aside>
+
+  <h3 id="options-models">Typed options vs. kwargs</h3>
+  <p>
+    <code>mem0/client/types.py</code> defines Pydantic option models that give IDE autocompletion and
+    runtime validation: <code>AddMemoryOptions</code>, <code>SearchMemoryOptions</code>,
+    <code>GetAllMemoryOptions</code>, <code>DeleteAllMemoryOptions</code>, <code>UpdateMemoryOptions</code>,
+    and <code>ProjectUpdateOptions</code>. Each method takes an optional <code>options=</code> model
+    <em>and</em> <code>**kwargs</code>; they are merged with kwargs winning:
+    <code>{**options.model_dump(exclude_unset=True), **kwargs}</code>. <code>None</code>-valued params are
+    stripped before sending (<code>_prepare_params</code> / <code>_prepare_payload</code>).
+  </p>
+  <dl>
+    <dt>AddMemoryOptions</dt>
+    <dd><code>filters</code>, <code>metadata</code>, <code>infer</code>, <code>custom_categories</code>,
+      <code>custom_instructions</code>, <code>timestamp</code>, <code>structured_data_schema</code>.</dd>
+    <dt>SearchMemoryOptions</dt>
+    <dd><code>filters</code>, <code>metadata</code>, <code>top_k</code>, <code>rerank</code>,
+      <code>threshold</code>, <code>fields</code>, <code>categories</code>. (Server-side
+      <a href="rerankers.html">reranking</a> is opt-in via <code>rerank</code>.)</dd>
+    <dt>GetAllMemoryOptions</dt>
+    <dd><code>filters</code>, <code>page</code>, <code>page_size</code>, <code>start_date</code>,
+      <code>end_date</code>, <code>categories</code>.</dd>
+    <dt>UpdateMemoryOptions</dt>
+    <dd><code>text</code>, <code>metadata</code>, <code>timestamp</code>.</dd>
+  </dl>
+  <aside class="callout insight">
+    <strong>latestOnly on hosted reads</strong> The v3 read endpoints support a <code>latest_only</code>
+    flag that collapses a superseded-memory chain to just its current head. The
+    <a href="typescript-sdk.html">TypeScript SDK</a> surfaces it as a typed <code>latestOnly</code> option
+    (serialized to <code>latest_only</code>; see <code>mem0-ts/src/client/mem0.types.ts</code>). The Python
+    client does not have a dedicated field in <code>types.py</code>, but because every method forwards
+    arbitrary <code>**kwargs</code> into the JSON body, you can pass <code>latest_only=True</code> directly
+    to <code>search()</code> / <code>get_all()</code>.
+  </aside>
+
+  <h3 id="delete-linked">delete_linked</h3>
+  <p>
+    <code>delete(memory_id, delete_linked=False)</code> (and its async twin) gained
+    <code>delete_linked</code>. When <code>True</code>, deleting a memory also transitively removes the
+    older memories it superseded (the v3 <code>linked_memory_ids</code> chain). It is the delete-side
+    counterpart of <code>latest_only</code>: without it, a superseded memory can resurface after you delete
+    the current head. The flag is sent as a query param, normalized via
+    <code>{"delete_linked": delete_linked or None}</code> so the param is omitted when <code>False</code>.
+  </p>
+
+  <h3 id="feedback">feedback</h3>
+  <p>
+    <code>feedback(memory_id, feedback=None, feedback_reason=None)</code> records relevance signals. The
+    <code>feedback</code> string is upper-cased and validated against
+    <code>{"POSITIVE", "NEGATIVE", "VERY_NEGATIVE"}</code> (or <code>None</code>); anything else raises
+    <code>ValueError</code>. POSTs <code>{memory_id, feedback, feedback_reason}</code> to
+    <code>/v1/feedback/</code>.
+  </p>
+
+  <details>
+    <summary>Deep dive: API-version sprawl in the endpoint paths</summary>
+    <p>
+      The client straddles three API generations. Writes/reads went to <strong>v3</strong>
+      (<code>/v3/memories/add/</code>, <code>/v3/memories/</code>, <code>/v3/memories/search/</code>), while
+      per-ID operations, history, batch, exports, summary, feedback, and entity listing still use
+      <strong>v1</strong> (<code>/v1/memories/{id}/</code>, <code>/v1/batch/</code>, <code>/v1/entities/</code>,
+      …). Entity <em>deletion</em> uses <strong>v2</strong> (<code>/v2/entities/{type}/{name}/</code>), and
+      org/project/webhook management uses the Django-style <code>/api/v1/...</code> prefix. The option-model
+      docstrings still mention "v2 API" for search/get_all even though the code now posts to v3 — a
+      doc-vs-code drift worth noting. The net effect: the client is a literal map of the platform's REST
+      surface as it evolved, not a clean single-version contract.
+    </p>
+  </details>
+</section>
+
+<section id="error-handling">
+  <h2>Error handling: the <code>api_error_handler</code> decorator</h2>
+  <p>
+    <code>mem0/client/utils.py</code> defines <code>api_error_handler</code>, a decorator applied to every
+    public client and project method. It converts raw <code>httpx</code> errors into the structured
+    exception hierarchy in <code>mem0/exceptions.py</code>.
+  </p>
+  <ul>
+    <li>On <code>httpx.HTTPStatusError</code>: it parses the response body (preferring the JSON
+      <code>detail</code> field), captures <code>{status_code, url, method}</code> as debug info, and calls
+      <code>create_exception_from_response(...)</code> to pick the right exception class by status code.</li>
+    <li>For <strong>429</strong> it additionally extracts <code>Retry-After</code> and
+      <code>X-RateLimit-*</code> headers into <code>debug_info</code> so callers can back off intelligently.</li>
+    <li>On <code>httpx.RequestError</code> it maps transport failures to <code>NetworkError</code> with a
+      specific <code>error_code</code>: <code>NET_TIMEOUT</code> (TimeoutException),
+      <code>NET_CONNECT</code> (ConnectError), or <code>NET_GENERIC</code>.</li>
+  </ul>
+  <p>
+    The <code>HTTP_STATUS_TO_EXCEPTION</code> map (in <code>exceptions.py</code>) wires status codes to
+    classes:
+  </p>
+  <table>
+    <thead><tr><th>Status</th><th>Exception</th></tr></thead>
+    <tbody>
+      <tr><td>400, 409, 422</td><td><code>ValidationError</code></td></tr>
+      <tr><td>401, 403</td><td><code>AuthenticationError</code></td></tr>
+      <tr><td>404</td><td><code>MemoryNotFoundError</code></td></tr>
+      <tr><td>408, 502, 503, 504</td><td><code>NetworkError</code></td></tr>
+      <tr><td>413</td><td><code>MemoryQuotaExceededError</code></td></tr>
+      <tr><td>429</td><td><code>RateLimitError</code></td></tr>
+      <tr><td>500 / default</td><td><code>MemoryError</code> (base)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    All inherit from <code>MemoryError</code>, which carries <code>message</code>, <code>error_code</code>,
+    <code>details</code>, <code>suggestion</code>, and <code>debug_info</code>. The legacy
+    <code>APIError</code> class still lives in <code>utils.py</code> but is explicitly marked deprecated
+    ("Use specific exception classes from <code>mem0.exceptions</code> instead").
+  </p>
+  <aside class="callout gotcha">
+    <strong>Gotcha</strong> <code>api_error_handler</code> wraps both sync and async methods, but its
+    <code>wrapper</code> is a plain (non-async) function. It catches the exceptions raised inside the
+    coroutine body of the async methods (which raise synchronously before awaiting, or surface via the
+    awaited <code>raise_for_status()</code> inside the same call stack). The construction-time
+    <code>_validate_api_key</code> is <em>not</em> decorated — it does its own try/except and raises a plain
+    <code>ValueError</code>.
+  </aside>
+</section>
+
+<section id="telemetry">
+  <h2>Telemetry capture</h2>
+  <p>
+    Each method ends with <code>capture_client_event(event_name, self, {...})</code> from
+    <code>mem0/memory/telemetry.py</code>. Events are named <code>client.&lt;method&gt;</code> (e.g.
+    <code>client.add</code>, <code>client.search</code>, <code>client.project.create</code>) and tagged with
+    <code>sync_type</code> ("sync"/"async").
+  </p>
+  <ul>
+    <li>It is gated on the <code>MEM0_TELEMETRY</code> flag and is <strong>never</strong> allowed to raise —
+      failures are swallowed at <code>debug</code> level.</li>
+    <li>Payloads avoid leaking memory content: for add/search/get_all the event records only
+      <code>list(kwargs.keys())</code> (the <em>names</em> of params used), and <code>metadata</code> is
+      explicitly <code>del</code>-eted from the captured kwargs before sending.</li>
+    <li>Events are attributed to the resolved <code>user_email</code> from the ping response (vs. the OSS
+      <code>capture_event</code> path which records the local vector-store/LLM class names — see
+      <a href="memory-engine.html#telemetry">the engine telemetry</a>).</li>
+  </ul>
+</section>
+
+<section id="projects">
+  <h2>Project &amp; member management (<code>project.py</code>)</h2>
+  <p>
+    Each client exposes a <code>.project</code> attribute — a <code>Project</code> (sync) or
+    <code>AsyncProject</code> (async) instance, both subclasses of the abstract <code>BaseProject</code>.
+    They are constructed in the client's <code>__init__</code> with the resolved
+    <code>org_id</code>/<code>project_id</code>/<code>user_email</code>, and they share the client's
+    underlying HTTP client object.
+  </p>
+  <dl>
+    <dt><code>ProjectConfig</code></dt>
+    <dd>A Pydantic model (<code>validate_assignment=True</code>, <code>extra="forbid"</code>) holding
+      <code>org_id</code>, <code>project_id</code>, <code>user_email</code>. Exposed via read-only
+      properties on <code>BaseProject</code>.</dd>
+    <dt>Validation</dt>
+    <dd>The constructor calls <code>_validate_org_project()</code>, raising
+      <code>ValueError("org_id and project_id must be set...")</code> if either is missing — so a key whose
+      ping did not resolve a project will fail when the <code>.project</code> manager is built.</dd>
+    <dt><code>_prepare_params</code> vs <code>_prepare_org_params</code></dt>
+    <dd>The project manager <em>does</em> inject <code>org_id</code>/<code>project_id</code> into params
+      (unlike the memory client). <code>_prepare_params</code> requires both together (passing only one
+      raises "Please provide both"); <code>_prepare_org_params</code> requires only <code>org_id</code> for
+      org-level calls.</dd>
+  </dl>
+
+  <h3>Methods</h3>
+  <table>
+    <thead><tr><th>Method</th><th>HTTP</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td><code>get(fields=None)</code></td><td>GET <code>/api/v1/orgs/organizations/{org}/projects/{proj}/</code></td><td>Fetch selected project fields (e.g. instructions, categories).</td></tr>
+      <tr><td><code>create(name, description=None)</code></td><td>POST <code>.../projects/</code></td><td>Needs <code>org_id</code> only; creates a new project.</td></tr>
+      <tr><td><code>update(custom_instructions=, custom_categories=, retrieval_criteria=, multilingual=, decay=)</code></td><td>PATCH <code>.../projects/{proj}/</code></td><td>At least one field required, else <code>ValueError</code>.</td></tr>
+      <tr><td><code>delete()</code></td><td>DELETE <code>.../projects/{proj}/</code></td><td>Deletes the project and its data.</td></tr>
+      <tr><td><code>get_members()</code></td><td>GET <code>.../projects/{proj}/members/</code></td><td>List members.</td></tr>
+      <tr><td><code>add_member(email, role="READER")</code></td><td>POST <code>.../members/</code></td><td><code>role</code> validated against <code>{"READER","OWNER"}</code>.</td></tr>
+      <tr><td><code>update_member(email, role)</code></td><td>PUT <code>.../members/</code></td><td>Same role validation.</td></tr>
+      <tr><td><code>remove_member(email)</code></td><td>DELETE <code>.../members/?email=</code></td><td>Email passed as query param.</td></tr>
+    </tbody>
+  </table>
+  <aside class="callout insight">
+    <strong>Memory Decay &amp; multilingual</strong> <code>project.update()</code> accepts
+    <code>decay</code> (a bool, off by default) that toggles search-time ranking which boosts
+    recently-used memories and dampens stale ones, and <code>multilingual</code> to keep the input language
+    for storage/retrieval. These project-level retrieval knobs are part of the hosted
+    <a href="memory-algorithm.html">retrieval algorithm</a>, not something the OSS engine exposes.
+  </aside>
+
+  <h3 id="deprecated-project-methods">Deprecated client-level project methods</h3>
+  <p>
+    The older <code>MemoryClient.get_project()</code> and <code>MemoryClient.update_project()</code> (and
+    their async twins) still work but log a <code>DeprecationWarning</code>-style warning steering you to
+    <code>client.project.get()</code> / <code>client.project.update()</code>. They will be removed in
+    package <code>v1.0</code>. Note <code>update_project</code> on the client supports
+    <code>memory_depth</code> and <code>usecase_setting</code> (via <code>ProjectUpdateOptions</code>) which
+    the new <code>project.update()</code> does not — the surfaces are not perfectly aligned during the
+    transition.
+  </p>
+</section>
+
+<section id="proxy">
+  <h2>The LLM proxy (<code>mem0/proxy/main.py</code>)</h2>
+  <p>
+    The proxy is an OpenAI-compatible chat-completion wrapper that transparently adds memory to any LLM
+    call: it retrieves relevant memories, injects them into the prompt, fires the completion through
+    <strong>LiteLLM</strong>, and asynchronously persists the new turn. It works with <em>either</em> a
+    hosted <code>MemoryClient</code> or the OSS <code>Memory</code> engine.
+  </p>
+  <dl>
+    <dt><code>Mem0</code></dt>
+    <dd>Top-level entry. <code>Mem0(config=None, api_key=None, host=None)</code>. If <code>api_key</code> is
+      given it builds a <code>MemoryClient</code>; otherwise it builds an OSS
+      <code>Memory.from_config(config)</code> (or default <code>Memory()</code>). Exposes
+      <code>.chat.completions.create(...)</code>.</dd>
+    <dt><code>Chat</code> → <code>Completions</code></dt>
+    <dd>Nested classes that mimic the OpenAI client shape so the proxy is a near drop-in:
+      <code>client.chat.completions.create(model=..., messages=..., user_id=...)</code>.</dd>
+  </dl>
+
+  <h3>LiteLLM bootstrapping</h3>
+  <p>
+    At import time the module tries <code>import litellm</code>; if missing, it
+    <strong>auto-pip-installs litellm in a subprocess</strong>
+    (<code>pip install litellm</code>) and re-imports, exiting the process if that fails.
+  </p>
+  <aside class="callout gotcha">
+    <strong>Gotcha</strong> Importing <code>mem0.proxy.main</code> can trigger a live
+    <code>pip install</code> as a side effect of import. This is convenient in notebooks but surprising in
+    locked-down or production environments; pre-installing <code>litellm</code> avoids it.
+  </aside>
+
+  <h3>The <code>create()</code> flow</h3>
+  <p>
+    <code>Completions.create(model, messages, user_id=, agent_id=, run_id=, top_k=10, ...)</code> takes the
+    full OpenAI parameter set (temperature, tools, streaming, response_format, etc.) plus Mem0-specific
+    args. The memory dance:
+  </p>
+  <ol>
+    <li><strong>Guard:</strong> requires at least one of <code>user_id</code>/<code>agent_id</code>/<code>run_id</code>
+      (else <code>ValueError</code>), and requires the model to support function calling per
+      <code>litellm.supports_function_calling(model)</code> (else <code>ValueError</code>).</li>
+    <li><strong>Prepend system prompt:</strong> <code>_prepare_messages</code> injects
+      <code>MEMORY_ANSWER_PROMPT</code> as a system message if the conversation does not already start with
+      one.</li>
+    <li><strong>Only when the last message is from the user:</strong>
+      <ul>
+        <li><strong>Write (fire-and-forget):</strong> <code>_async_add_to_memory</code> spawns a
+          <em>daemon thread</em> that calls <code>mem0_client.add(...)</code> with the messages. It does not
+          block the completion and its result/errors are not surfaced.</li>
+        <li><strong>Read:</strong> <code>_fetch_relevant_memories</code> joins the
+          <strong>last 6 messages</strong> as <code>"role: content"</code> lines and calls
+          <code>search(query=..., top_k=top_k)</code>.</li>
+        <li><strong>Inject:</strong> <code>_format_query_with_memories</code> rewrites the last user message
+          to embed the retrieved facts plus an "Entities" line and the original question.</li>
+      </ul>
+    </li>
+    <li><strong>Complete:</strong> forwards everything to <code>litellm.completion(...)</code> and returns
+      its response unchanged.</li>
+    <li><strong>Telemetry:</strong> emits <code>mem0.chat.create</code> via <code>capture_event</code> (OSS
+      <code>Memory</code>) or <code>capture_client_event</code> (hosted client).</li>
+  </ol>
+
+  <pre><code class="language-python">from mem0.proxy.main import Mem0
+
+client = Mem0(api_key="m0-...")   # hosted; or Mem0(config={...}) for OSS
+resp = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": "What movies should I watch tonight?"}],
+    user_id="alice",
+    top_k=5,
+)
+# memories about Alice's taste were retrieved + injected; this turn is saved async</code></pre>
+
+  <aside class="callout perf">
+    <strong>Perf / correctness trade-off</strong> Memory writes run on a fire-and-forget daemon thread, so
+    a slow or failing <code>add()</code> never delays or breaks the chat response — but it also means a
+    failed write is silent, and a memory written this turn is <em>not</em> guaranteed to be searchable on
+    the immediate next turn (race against indexing). Retrieval uses only the trailing 6 messages; the code
+    has a <code>TODO</code> to summarize longer history instead of truncating.</aside>
+
+  <aside class="callout insight">
+    <strong>Format branches on client type</strong> <code>_format_query_with_memories</code> reads
+    <code>relevant_memories["results"]</code> and pulls <code>relations</code> (graph entities) only for the
+    OSS <code>Memory</code> path; for the hosted <code>MemoryClient</code> path it iterates the result list
+    directly and produces no entities. So injected context differs slightly between the two backends.
+  </aside>
+</section>
+
+<section id="proxy-flow">
+  <h2>End-to-end proxy sequence</h2>
+  <pre class="mermaid">
+sequenceDiagram
+    participant App
+    participant Proxy as Completions.create
+    participant Mem as MemoryClient / Memory
+    participant LLM as litellm.completion
+    App->>Proxy: create(model, messages, user_id, top_k)
+    Proxy->>Proxy: validate ids + function-calling support
+    Proxy->>Proxy: prepend MEMORY_ANSWER_PROMPT
+    Proxy-->>Mem: add(messages) on daemon thread (fire-and-forget)
+    Proxy->>Mem: search(last 6 msgs joined, top_k)
+    Mem-->>Proxy: relevant memories
+    Proxy->>Proxy: rewrite last user msg with facts + entities
+    Proxy->>LLM: completion(prepared_messages, ...)
+    LLM-->>Proxy: response
+    Proxy-->>App: response (unchanged)
+  </pre>
+</section>
+
+<section id="contrast-engine">
+  <h2>Hosted client vs. self-hosted engine</h2>
+  <p>
+    Same verbs, fundamentally different machinery. The hosted client is an HTTP shell; the
+    <a href="memory-engine.html">engine</a> runs the whole pipeline locally with pluggable
+    <a href="llms.html">LLM</a>, <a href="embeddings.html">embedding</a>, and
+    <a href="vector-stores.html">vector-store</a> providers wired by the
+    <a href="config-system.html">config system</a>.
+  </p>
+  <table>
+    <thead>
+      <tr><th>Aspect</th><th>MemoryClient / AsyncMemoryClient</th><th>Memory / AsyncMemory (engine)</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Transport</td><td>HTTP to <code>api.mem0.ai</code> (httpx)</td><td>In-process Python</td></tr>
+      <tr><td>Construction</td><td><code>api_key</code> / <code>MEM0_API_KEY</code></td><td><code>MemoryConfig</code> / <code>from_config()</code></td></tr>
+      <tr><td>Extraction &amp; retrieval</td><td>Server-side (opaque)</td><td>Local <a href="memory-algorithm.html">algorithm</a>, your providers</td></tr>
+      <tr><td>History store</td><td>Server-side</td><td>Local SQLite</td></tr>
+      <tr><td>Identity scoping</td><td><code>filters={'user_id': ...}</code> (v3); org/project from key</td><td>Direct <code>user_id=</code>/<code>agent_id=</code> args</td></tr>
+      <tr><td>Org/projects/members</td><td>Yes (<code>.project</code>)</td><td>N/A</td></tr>
+      <tr><td>Webhooks / exports / feedback / decay</td><td>Yes</td><td>No</td></tr>
+      <tr><td>Errors</td><td><code>api_error_handler</code> → status-mapped <code>MemoryError</code> subclasses</td><td>Provider/DB exceptions</td></tr>
+      <tr><td>Graph / entities</td><td>Server-side; <code>relations</code> not returned to proxy</td><td>Entity linking in-engine (graph memory <a href="graph-memory.html">deprecated</a> in OSS core)</td></tr>
+    </tbody>
+  </table>
+  <p>
+    Both are used by the <a href="server.html">self-hosted FastAPI server</a> and have parity in the
+    <a href="typescript-sdk.html">TypeScript SDK</a> (which exposes <code>latestOnly</code>/<code>deleteLinked</code>
+    as first-class typed options). For the broader picture see the
+    <a href="architecture.html">architecture overview</a>; for cross-cutting gotchas see the
+    <a href="surprises.html">surprises</a> page.
+  </p>
+</section>

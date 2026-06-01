@@ -1,0 +1,3780 @@
+{
+  "generated": "2026-06-01",
+  "pages": [
+    {
+      "slug": "architecture",
+      "title": "Architecture Overview",
+      "summary": "mem0 is a polyglot monorepo centered on the mem0 Python SDK (PyPI mem0ai) and its TypeScript twin mem0-ts, each exposing two usage modes from one import surface: a self-hosted Memory/AsyncMemory engine and a thin hosted MemoryClient. The self-hosted engine is fully config-driven: a single MemoryConfig Pydantic model drives four factories that lazily instantiate concrete LLM, embedding, vector-store, and reranker providers behind abstract base classes. Each provider category follows a consistent plugin shape (base.py + concrete modules + config + factory registry). Graph memory, formerly a fifth category, has been removed from the OSS core and replaced by in-pipeline entity linking.",
+      "surprises": [
+        {
+          "title": "Provider counts in AGENTS.md are stale",
+          "detail": "AGENTS.md advertises 24 LLMs / 30 vector stores / 15 embeddings / 4 graph stores / 5 rerankers. Counting the actual factory-registered provider modules in the tree (excluding base.py/configs.py/__init__.py/utils.py/mock.py) yields 18 LLMs / 24 vector stores / 11 embeddings / 5 rerankers, and zero graph stores.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Graph memory fully removed from OSS core",
+          "detail": "There is no mem0/graphs/ directory, no graph factory in mem0/utils/factory.py, no graph field on MemoryConfig, and grep -in graph mem0/memory/main.py returns nothing. The TS OSS tree (mem0-ts/src/oss/src/) also has no graphs/ dir, contradicting AGENTS.md which still lists src/graphs/. Relationship retrieval is now handled by entity linking inside the vector pipeline.",
+          "category": "deprecation"
+        },
+        {
+          "title": "Factories store providers as dotted strings for lazy import",
+          "detail": "Each factory's provider_to_class maps a provider name to a dotted import path (e.g. 'mem0.vector_stores.qdrant.Qdrant') resolved on demand via load_class (importlib.import_module + getattr). Heavy optional backend SDKs are only imported when that provider is selected; unknown names raise ValueError at create() time.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Reranker directory is singular and providers are suffixed",
+          "detail": "The reranker category lives in mem0/reranker/ (singular, not rerankers/) and its provider files carry a _reranker suffix (cohere_reranker.py, llm_reranker.py). Reranking is also entirely opt-in: MemoryConfig.reranker defaults to None and self.reranker is only built if configured.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Category __init__.py registries are partial; the factory is the source of truth",
+          "detail": "mem0/reranker/__init__.py re-exports only 3 of the 5 factory-supported rerankers and mem0/llms/__init__.py is empty. The authoritative list of supported providers is the factory's provider_to_class dict, not the package init.",
+          "category": "design"
+        },
+        {
+          "title": "EmbedderFactory can return a MockEmbeddings",
+          "detail": "When the vector store is upstash_vector with enable_embeddings set, EmbedderFactory.create returns a MockEmbeddings instance so the vector store performs its own embedding rather than the SDK embedder.",
+          "category": "clever-pattern"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "memory",
+          "label": "Memory / AsyncMemory",
+          "kind": "class"
+        },
+        {
+          "id": "memory-client",
+          "label": "MemoryClient / AsyncMemoryClient",
+          "kind": "class"
+        },
+        {
+          "id": "memory-config",
+          "label": "MemoryConfig",
+          "kind": "class"
+        },
+        {
+          "id": "llm-factory",
+          "label": "LlmFactory",
+          "kind": "class"
+        },
+        {
+          "id": "embedder-factory",
+          "label": "EmbedderFactory",
+          "kind": "class"
+        },
+        {
+          "id": "vector-store-factory",
+          "label": "VectorStoreFactory",
+          "kind": "class"
+        },
+        {
+          "id": "reranker-factory",
+          "label": "RerankerFactory",
+          "kind": "class"
+        },
+        {
+          "id": "provider-plugin-pattern",
+          "label": "Provider plugin pattern",
+          "kind": "pattern"
+        },
+        {
+          "id": "load-class-lazy-import",
+          "label": "load_class dotted-string lazy import",
+          "kind": "pattern"
+        },
+        {
+          "id": "vector-store-base",
+          "label": "VectorStoreBase",
+          "kind": "interface"
+        },
+        {
+          "id": "llm-base",
+          "label": "LLMBase",
+          "kind": "interface"
+        },
+        {
+          "id": "embedding-base",
+          "label": "EmbeddingBase",
+          "kind": "interface"
+        },
+        {
+          "id": "base-reranker",
+          "label": "BaseReranker",
+          "kind": "interface"
+        },
+        {
+          "id": "polyglot-monorepo",
+          "label": "Polyglot monorepo",
+          "kind": "concept"
+        },
+        {
+          "id": "proxy-mem0",
+          "label": "Mem0 proxy (OpenAI-shaped chat wrapper)",
+          "kind": "class"
+        },
+        {
+          "id": "testing-cicd",
+          "label": "Testing & CI/CD pipeline",
+          "kind": "concept"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "config-system",
+          "llms",
+          "embeddings",
+          "vector-stores",
+          "rerankers"
+        ],
+        "usedBy": [
+          "data-flow",
+          "memory-engine",
+          "glossary"
+        ],
+        "related": [
+          "memory-algorithm",
+          "memory-engine",
+          "client-sdk",
+          "typescript-sdk",
+          "graph-memory",
+          "server",
+          "openmemory",
+          "integrations",
+          "evaluation",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/__init__.py",
+          "note": "Public exports: Memory, AsyncMemory, MemoryClient, AsyncMemoryClient — the entire package surface"
+        },
+        {
+          "path": "mem0/configs/base.py",
+          "symbol": "MemoryConfig",
+          "note": "Root config: vector_store, llm, embedder, reranker (optional), history_db_path, version, custom_instructions"
+        },
+        {
+          "path": "mem0/utils/factory.py",
+          "symbol": "LlmFactory / EmbedderFactory / VectorStoreFactory / RerankerFactory",
+          "note": "The four factories + load_class lazy importer; authoritative provider_to_class registries"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory.__init__",
+          "note": "Wires MemoryConfig through the four factories into self.llm/embedding_model/vector_store/reranker + SQLiteManager; lazy entity_store. No graph references."
+        },
+        {
+          "path": "mem0/llms/configs.py",
+          "symbol": "LlmConfig",
+          "note": "Provider+config sub-config with allow-list validator (mirrored by EmbedderConfig, VectorStoreConfig)"
+        },
+        {
+          "path": "mem0/vector_stores/base.py",
+          "symbol": "VectorStoreBase",
+          "note": "Richest abstract base; includes default no-op keyword_search overridden by BM25-capable stores"
+        },
+        {
+          "path": "mem0/proxy/main.py",
+          "symbol": "Mem0",
+          "note": "OpenAI-shaped chat.completions wrapper that injects retrieved memories"
+        },
+        {
+          "path": "mem0/client/main.py",
+          "symbol": "MemoryClient / AsyncMemoryClient",
+          "note": "Hosted-platform HTTP clients; no local LLM/embedder/vector store"
+        }
+      ],
+      "searchTerms": [
+        "architecture overview",
+        "monorepo layout",
+        "Memory vs MemoryClient",
+        "self-hosted vs hosted",
+        "MemoryConfig",
+        "provider plugin pattern",
+        "LlmFactory",
+        "EmbedderFactory",
+        "VectorStoreFactory",
+        "RerankerFactory",
+        "config-driven wiring",
+        "provider registry",
+        "load_class lazy import",
+        "base.py abstract class",
+        "graph memory removed",
+        "entity linking",
+        "mem0 package structure",
+        "mem0-ts oss",
+        "number of providers",
+        "add a new provider",
+        "testing",
+        "pytest",
+        "CI",
+        "CD",
+        "GitHub Actions",
+        "OIDC publishing",
+        "tag prefix",
+        "llms.txt check",
+        "release pipeline"
+      ]
+    },
+    {
+      "slug": "data-flow",
+      "title": "Data Flow",
+      "summary": "Traces the two engine hot paths end to end. add() normalizes messages then runs either an infer=False verbatim fast path or the infer=True V3 phased batch pipeline: existing-memory retrieval, one ADD-only LLM extraction call, batch embedding, MD5 hash dedup, batch vector upsert, batch SQLite history insert, batch entity linking, message buffering, and telemetry. search() embeds the query while computing BM25 keyword and entity-store signals, fuses them additively over an adaptive divisor in score_and_rank(), and optionally reranks. AsyncMemory mirrors both paths with asyncio.to_thread around every blocking call (and asyncio.gather only in delete_all); notably there is no temporal ranking at query time — temporal reasoning is an extraction-time concern.",
+      "surprises": [
+        {
+          "title": "add() extraction is ADD-only — no UPDATE/DELETE on the add path",
+          "detail": "The single LLM call in _add_to_vector_store uses ADDITIVE_EXTRACTION_PROMPT and only emits ADD operations with optional linked_memory_ids. Dedup is mechanical (MD5 hash against existing + within-batch) and the LLM is told to skip already-captured facts. UPDATE/DELETE only occur when a caller invokes update()/delete() directly. This is a deliberate departure from the older two-pass fact+decision design.",
+          "category": "design"
+        },
+        {
+          "title": "No temporal/recency ranking in search scoring",
+          "detail": "score_and_rank in mem0/utils/scoring.py fuses only semantic + BM25 + entity_boost; it never weights by created_at or recency. Temporal reasoning happens at extraction time — the ADDITIVE_EXTRACTION_PROMPT grounds relative references like 'last week' to concrete dates against the Observation Date before storing. Time-awareness is baked into the stored text, not a query-time signal.",
+          "category": "correctness"
+        },
+        {
+          "title": "Threshold gates the semantic score BEFORE fusion",
+          "detail": "In score_and_rank, any candidate with semantic_score < threshold is dropped before combining, so BM25 or entity boosts cannot rescue a sub-threshold semantic match. The combined score divisor (max_possible) adapts globally per query: 1.0 semantic-only, 1.5 +entity, 2.0 +BM25, 2.5 all three.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Candidate pool is seeded only from semantic results",
+          "detail": "_search_vector_store over-fetches max(limit*4, 60) semantic results, then BM25/entity scores only re-rank within that pool. A memory matching BM25 or an entity but absent from the semantic top-internal_limit cannot surface in results.",
+          "category": "design"
+        },
+        {
+          "title": "infer=False skips the LLM, dedup, and entity linking entirely",
+          "detail": "The fast path stores each message verbatim via _create_memory: one embed + one vector insert + one ADD history row per message, with name promoted to actor_id. No existing-memory search, no extraction call, no hash dedup against the corpus, no entity linking — minimizing latency and cost for pre-cleaned facts.",
+          "category": "performance"
+        },
+        {
+          "title": "AsyncMemory uses to_thread sequentially, not gather, inside add/search",
+          "detail": "Both async _add_to_vector_store and _search_vector_store wrap each blocking call in asyncio.to_thread but await them in sequence — the steps are not run concurrently. asyncio.gather appears only in AsyncMemory.delete_all to fan out per-memory deletes. The reranker is dispatched via asyncio.to_thread so it cannot block the event loop.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Entity boosts are spread-attenuated and capped at 0.5",
+          "detail": "_compute_entity_boosts weights each match by similarity * ENTITY_BOOST_WEIGHT(0.5) * (1 / (1 + 0.001*(num_linked-1)^2)), so a promiscuous entity linked to many memories contributes a smaller per-memory boost. Only entity-store matches with similarity >= 0.5 count; entity upsert/link uses a stricter >= 0.95 match threshold.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Conversation context is saved even when nothing is extracted",
+          "detail": "If the LLM extracts nothing or all extractions are hash duplicates, _add_to_vector_store still calls db.save_messages before returning [], preserving the rolling 10-message buffer for the next turn's Phase-0 context.",
+          "category": "gotcha"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "add-to-vector-store",
+          "label": "_add_to_vector_store (V3 phased pipeline)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "search-vector-store",
+          "label": "_search_vector_store (hybrid retrieval)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "score-and-rank",
+          "label": "score_and_rank (additive fusion)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "additive-extraction-prompt",
+          "label": "ADDITIVE_EXTRACTION_PROMPT (ADD-only)",
+          "kind": "pattern"
+        },
+        {
+          "id": "memory-class",
+          "label": "Memory",
+          "kind": "class"
+        },
+        {
+          "id": "async-memory-class",
+          "label": "AsyncMemory",
+          "kind": "class"
+        },
+        {
+          "id": "sqlite-manager",
+          "label": "SQLiteManager",
+          "kind": "class"
+        },
+        {
+          "id": "entity-extraction",
+          "label": "extract_entities / extract_entities_batch",
+          "kind": "module"
+        },
+        {
+          "id": "lemmatize-bm25",
+          "label": "lemmatize_for_bm25",
+          "kind": "module"
+        },
+        {
+          "id": "normalize-bm25",
+          "label": "normalize_bm25 / get_bm25_params",
+          "kind": "algorithm"
+        },
+        {
+          "id": "compute-entity-boosts",
+          "label": "_compute_entity_boosts",
+          "kind": "algorithm"
+        },
+        {
+          "id": "create-memory",
+          "label": "_create_memory",
+          "kind": "algorithm"
+        },
+        {
+          "id": "build-filters-metadata",
+          "label": "_build_filters_and_metadata",
+          "kind": "pattern"
+        },
+        {
+          "id": "hash-dedup",
+          "label": "MD5 hash deduplication",
+          "kind": "pattern"
+        },
+        {
+          "id": "entity-store",
+          "label": "entity store (sibling collection)",
+          "kind": "service"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-algorithm",
+          "vector-stores",
+          "embeddings",
+          "rerankers",
+          "config-system",
+          "llms"
+        ],
+        "usedBy": [
+          "architecture",
+          "memory-engine",
+          "server",
+          "client-sdk"
+        ],
+        "related": [
+          "memory-engine",
+          "memory-algorithm",
+          "surprises",
+          "graph-memory"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory._add_to_vector_store",
+          "note": "infer=False fast path and the infer=True V3 phased batch pipeline (phases 0-8): existing-memory search, ADD-only LLM extraction, batch embed, hash dedup, batch insert, batch history, batch entity linking, save_messages, telemetry"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory._search_vector_store",
+          "note": "hybrid retrieval: lemmatize + NER + embed query, over-fetch semantic (max(limit*4,60)), keyword_search BM25, entity boosts, score_and_rank fusion, MemoryItem formatting"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "AsyncMemory",
+          "note": "mirrored async add/search/CRUD with asyncio.to_thread around every blocking call; asyncio.gather only in delete_all; reranker dispatched via to_thread"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "_compute_entity_boosts",
+          "note": "per-entity entity-store search (top_k=500, sim>=0.5), spread-attenuated boost = similarity * 0.5 * memory_count_weight"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "_create_memory / _update_memory / _delete_memory",
+          "note": "vector upsert/update/delete plus SQLite ADD/UPDATE/DELETE history rows and entity-store re-linking/cleanup"
+        },
+        {
+          "path": "mem0/utils/scoring.py",
+          "symbol": "score_and_rank / normalize_bm25 / get_bm25_params / ENTITY_BOOST_WEIGHT",
+          "note": "threshold gates semantic score pre-fusion; additive combine over adaptive max_possible divisor (1.0/1.5/2.0/2.5); BM25 sigmoid normalization by query length; no temporal weighting"
+        },
+        {
+          "path": "mem0/memory/storage.py",
+          "symbol": "SQLiteManager",
+          "note": "history + messages tables; add_history/batch_add_history; save_messages 10-row eviction; get_last_messages for Phase-0 context; lock-guarded transactions; check_same_thread=False"
+        },
+        {
+          "path": "mem0/utils/entity_extraction.py",
+          "symbol": "extract_entities / extract_entities_batch",
+          "note": "spaCy-based PROPER/QUOTED/COMPOUND/NOUN extraction; batch variant uses nlp.pipe"
+        },
+        {
+          "path": "mem0/utils/lemmatization.py",
+          "symbol": "lemmatize_for_bm25",
+          "note": "spaCy lemmatizer dropping stopwords/punctuation, keeps -ing forms; falls back to raw text if spaCy unavailable"
+        },
+        {
+          "path": "mem0/configs/prompts.py",
+          "symbol": "ADDITIVE_EXTRACTION_PROMPT / AGENT_CONTEXT_SUFFIX / generate_additive_extraction_prompt",
+          "note": "ADD-only extraction system+user prompts; existing memories passed as integer-id deduplication reference; temporal grounding against Observation Date"
+        },
+        {
+          "path": "mem0/vector_stores/base.py",
+          "symbol": "keyword_search / search_batch",
+          "note": "keyword_search default returns None (opportunistic BM25); search_batch default loops search()"
+        }
+      ],
+      "searchTerms": [
+        "add pipeline",
+        "search retrieval",
+        "data flow",
+        "infer false fast path",
+        "ADD-only extraction",
+        "ADDITIVE_EXTRACTION_PROMPT",
+        "hybrid search",
+        "BM25 keyword search",
+        "semantic search fusion",
+        "score_and_rank",
+        "entity boost",
+        "entity linking",
+        "_add_to_vector_store",
+        "_search_vector_store",
+        "AsyncMemory asyncio.to_thread",
+        "asyncio.gather delete_all",
+        "SQLite history",
+        "batch_add_history",
+        "save_messages",
+        "lemmatize_for_bm25",
+        "extract_entities",
+        "hash dedup md5",
+        "vector upsert",
+        "telemetry capture_event",
+        "reranking",
+        "temporal grounding",
+        "over-fetch internal_limit",
+        "session scope",
+        "MemoryItem"
+      ]
+    },
+    {
+      "slug": "memory-engine",
+      "title": "Memory Engine",
+      "summary": "The Memory Engine documents the OSS core of mem0: the Memory and AsyncMemory classes in mem0/memory/main.py, both built on the abstract MemoryBase, that orchestrate embedding, vector storage, single-pass LLM extraction, entity linking, and a local SQLite change log. It covers construction (Memory(config) and from_config), every public method's signature and semantics (add/search/get/get_all/update/delete/delete_all/history/reset), the sync-vs-async design where AsyncMemory mirrors Memory via asyncio.to_thread, the SQLiteManager history/messages schema and migration, session scoping with required identifiers, metadata shaping, the infer=False raw path, telemetry, and the ~/.mem0 setup. It surfaces gotchas around required identifiers, filters-vs-top-level kwargs, and async/sync error-type drift.",
+      "surprises": [
+        {
+          "title": "add() is ADD-only — no LLM-driven UPDATE/DELETE",
+          "detail": "The inference path issues exactly one LLM call producing a JSON {\"memory\":[...]} list of new facts, then dedupes against existing memories purely by md5 hash. Unlike older mem0, the engine no longer asks the LLM to emit UPDATE/DELETE operations during add().",
+          "category": "design"
+        },
+        {
+          "title": "search/get_all reject top-level identifiers but add does not",
+          "detail": "_reject_top_level_entity_params raises ValueError if user_id/agent_id/run_id are passed as top-level kwargs to search() or get_all(); they must go inside filters={...}. add() is the exception and accepts them directly. This asymmetry is a common runtime trap.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Async and sync raise different exception types for bad memory_type",
+          "detail": "Sync add() raises Mem0ValidationError VALIDATION_002 for an invalid memory_type, but async add() raises a plain ValueError for the identical condition. Catching Mem0ValidationError will miss the async path.",
+          "category": "correctness"
+        },
+        {
+          "title": "add() returns empty results silently on extraction failure",
+          "detail": "If the LLM extraction call fails, returns nothing, or all candidates are hash-deduped, add() logs at error/debug level and returns {\"results\": []} without raising — it still persists the raw messages. Callers must check the list rather than assume a write occurred.",
+          "category": "gotcha"
+        },
+        {
+          "title": "AsyncMemory is a full duplicate, not a wrapper",
+          "detail": "Every method body is copied; async-ness comes solely from wrapping blocking calls (embed, vector ops, LLM, SQLite, lemmatize, entity extraction) in asyncio.to_thread. The only genuine parallelism is delete_all using asyncio.gather. The single shared SQLite connection (check_same_thread=False) is protected by a process-local threading.Lock.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "History migration is lossy-by-design",
+          "detail": "_migrate_history_table renames the old history table, recreates the new schema, and copies only the intersection of old and new columns inside one transaction — legacy group-chat columns are dropped and new columns left NULL.",
+          "category": "design"
+        },
+        {
+          "title": "Telemetry hashes identifiers and samples hot paths",
+          "detail": "process_telemetry_filters md5-hashes user_id/agent_id/run_id into encoded_ids and only reports filter key names. Lifecycle events (init/reset/_create_procedural_memory/$identify) always fire at 100%; hot-path events obey MEM0_TELEMETRY_SAMPLE_RATE (default 0.1). MEM0_TELEMETRY=False disables everything. mark_aliased stores an sha256 of anon_id+email, never the plaintext email.",
+          "category": "security"
+        },
+        {
+          "title": "delete_all requires an identifier; there is no wipe shortcut",
+          "detail": "delete_all raises ValueError if called with no user_id/agent_id/run_id, explicitly directing callers to use reset() to clear everything.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Qdrant entity store shares the primary client",
+          "detail": "For embedded qdrant the lazily-built entity store reuses the primary vector store's client object rather than opening a second connection, specifically to avoid RocksDB lock contention on the same on-disk path.",
+          "category": "performance"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "memory-class",
+          "label": "Memory",
+          "kind": "class"
+        },
+        {
+          "id": "async-memory-class",
+          "label": "AsyncMemory",
+          "kind": "class"
+        },
+        {
+          "id": "memory-base",
+          "label": "MemoryBase",
+          "kind": "interface"
+        },
+        {
+          "id": "sqlite-manager",
+          "label": "SQLiteManager",
+          "kind": "class"
+        },
+        {
+          "id": "build-filters-and-metadata",
+          "label": "_build_filters_and_metadata",
+          "kind": "algorithm"
+        },
+        {
+          "id": "add-phased-pipeline",
+          "label": "V3 phased batch add pipeline",
+          "kind": "algorithm"
+        },
+        {
+          "id": "entity-store",
+          "label": "Lazy entity store",
+          "kind": "pattern"
+        },
+        {
+          "id": "anonymous-telemetry",
+          "label": "AnonymousTelemetry",
+          "kind": "service"
+        },
+        {
+          "id": "memory-item",
+          "label": "MemoryItem",
+          "kind": "class"
+        },
+        {
+          "id": "memory-config",
+          "label": "MemoryConfig",
+          "kind": "class"
+        },
+        {
+          "id": "session-scoping",
+          "label": "Session scoping (user_id/agent_id/run_id/actor_id)",
+          "kind": "concept"
+        },
+        {
+          "id": "infer-false-path",
+          "label": "infer=False raw path",
+          "kind": "pattern"
+        },
+        {
+          "id": "asyncio-to-thread",
+          "label": "asyncio.to_thread offloading",
+          "kind": "pattern"
+        },
+        {
+          "id": "setup-config",
+          "label": "setup_config / ~/.mem0",
+          "kind": "module"
+        },
+        {
+          "id": "structured-exceptions",
+          "label": "Structured exceptions (exceptions.py)",
+          "kind": "module"
+        },
+        {
+          "id": "telemetry-sampling",
+          "label": "Telemetry sampling",
+          "kind": "concept"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "config-system",
+          "llms",
+          "embeddings",
+          "vector-stores",
+          "rerankers",
+          "memory-algorithm"
+        ],
+        "usedBy": [
+          "client-sdk",
+          "server",
+          "data-flow",
+          "integrations"
+        ],
+        "related": [
+          "architecture",
+          "data-flow",
+          "memory-algorithm",
+          "surprises",
+          "graph-memory"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory",
+          "note": "Sync engine: add/search/get/get_all/update/delete/delete_all/history/reset plus the eight-phase _add_to_vector_store and _search_vector_store."
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "AsyncMemory",
+          "note": "Async mirror of Memory; every blocking call wrapped in asyncio.to_thread, delete_all uses asyncio.gather."
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "_build_filters_and_metadata",
+          "note": "Builds storage metadata template and query filters; enforces at-least-one-identifier rule (VALIDATION_001) and resolves actor_id precedence."
+        },
+        {
+          "path": "mem0/memory/base.py",
+          "symbol": "MemoryBase",
+          "note": "ABC declaring get/get_all/update/delete/history as abstract; add/search/delete_all/reset are concrete additions in the subclasses."
+        },
+        {
+          "path": "mem0/memory/storage.py",
+          "symbol": "SQLiteManager",
+          "note": "history + messages tables, BEGIN/COMMIT with threading.Lock, _migrate_history_table intersection copy, save_messages 10-row eviction by session_scope."
+        },
+        {
+          "path": "mem0/memory/telemetry.py",
+          "symbol": "capture_event",
+          "note": "PostHog lazy singleton, MEM0_TELEMETRY opt-out, sampling via _sampling_before_send, lifecycle events bypass sampling."
+        },
+        {
+          "path": "mem0/memory/setup.py",
+          "symbol": "setup_config",
+          "note": "Creates ~/.mem0 (MEM0_DIR override), ensures top-level user_id, get_or_create_user_id, hashed alias markers."
+        },
+        {
+          "path": "mem0/memory/utils.py",
+          "symbol": "process_telemetry_filters",
+          "note": "md5-hashes user_id/agent_id/run_id into encoded_ids; parse_messages/remove_code_blocks/extract_json/parse_vision_messages helpers."
+        },
+        {
+          "path": "mem0/configs/base.py",
+          "symbol": "MemoryConfig",
+          "note": "Default config: history_db_path=~/.mem0/history.db, version v1.1; MemoryItem result schema (id/memory/hash/metadata/score/created_at/updated_at)."
+        }
+      ],
+      "searchTerms": [
+        "Memory class",
+        "AsyncMemory",
+        "mem0 add search update delete",
+        "MemoryBase",
+        "from_config",
+        "SQLiteManager history table",
+        "history.db",
+        "session scoping user_id agent_id run_id actor_id",
+        "infer=False raw memory",
+        "required identifier filters",
+        "_build_filters_and_metadata",
+        "asyncio.to_thread concurrency",
+        "MEM0_TELEMETRY opt-out",
+        "entity store linked_memory_ids",
+        "procedural memory",
+        "memory_type",
+        "reset delete_all",
+        "threshold top_k validation",
+        "change history ADD UPDATE DELETE",
+        "~/.mem0 config.json",
+        "exceptions",
+        "MemoryError",
+        "HTTP_STATUS_TO_EXCEPTION",
+        "telemetry",
+        "sampling",
+        "MEM0_TELEMETRY",
+        "PostHog",
+        "MEM0_TELEMETRY_SAMPLE_RATE"
+      ]
+    },
+    {
+      "slug": "memory-algorithm",
+      "title": "Memory Algorithm",
+      "summary": "The April-2026 (SDK v2.0.0/v3.0.0) rewrite of mem0's memory pipeline: a single-pass ADD-only extractor (one LLM call, no UPDATE/DELETE, memories accumulate) and a multi-signal hybrid retriever that fuses dense semantic similarity, BM25 keyword matching over lemmatized text, and an entity-linking boost into one combined score. Extraction grounds relative time references to absolute dates so dated instances become independently retrievable, enabling temporal queries. Entity linking (the OSS replacement for graph memory) stores entities in a parallel vector collection and consumes them only as a retrieval boost. spaCy is an optional [nlp] extra; without it the system degrades to semantic-only.",
+      "surprises": [
+        {
+          "title": "Single LLM call replaces extract-then-diff, no UPDATE/DELETE",
+          "detail": "The pre-v3 algorithm used two LLM calls (extract facts, then diff against existing state for ADD/UPDATE/DELETE/NONE). The April-2026 algorithm collapses this into one ADD-only call. add() now returns only event:'ADD'; memories accumulate and nothing is overwritten or deleted. Code branching on UPDATE/DELETE events silently never fires.",
+          "category": "design"
+        },
+        {
+          "title": "Anti-hallucination integer ID mapping for dedup context",
+          "detail": "Existing memories shown to the LLM for dedup are presented with sequential integer IDs ('0','1',...) while a separate uuid_mapping dict resolves them back to real UUIDs. The model never sees raw UUIDs, so it cannot fabricate or corrupt an identifier. Persisted memories always get a fresh uuid.uuid4().",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Adaptive divisor keeps fused scores comparable across stores",
+          "detail": "score_and_rank normalizes the additive sum by max_possible, which adapts to which signals fired (1.0 semantic-only, 2.0 +BM25, 2.5 +entity, 1.5 semantic+entity). Threshold gates the semantic score BEFORE combining, so BM25/entity can never resurrect a sub-threshold candidate. Entity/BM25 are additive bonuses, never a re-weighting of baseline semantic relevance.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Entity boost is spread-attenuated to avoid hub domination",
+          "detail": "_compute_entity_boosts attenuates an entity's boost quadratically by how many memories it links to: memory_count_weight = 1/(1+0.001*(num_linked-1)^2), boost = similarity * 0.5 * weight. A hyper-connected entity (e.g. the user's own name) thus contributes far less per memory, capped at ENTITY_BOOST_WEIGHT=0.5.",
+          "category": "design"
+        },
+        {
+          "title": "spaCy [nlp] extra is optional; absence silently degrades retrieval",
+          "detail": "Without mem0ai[nlp], extract_entities returns [] (no entity linking/boost) and lemmatize_for_bm25 returns raw text. Qdrant additionally needs fastembed for BM25 sparse vectors and logs a warning and disables BM25 if missing. spacy_models.py auto-downloads en_core_web_sm on first use and sets sticky failure flags otherwise.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Cross-language collection breaks BM25",
+          "detail": "Python SDK writes the lemmatized field as text_lemmatized (snake_case); the TypeScript SDK writes textLemmatized (camelCase). Sharing one Qdrant collection between SDKs silently breaks lemma-based BM25 matching across languages; collections must be language-scoped.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Temporal reasoning is an extraction-time emergent property",
+          "detail": "There is no time-decay ranking function. Relative time references are resolved to absolute dates against the Observation Date inside ADDITIVE_EXTRACTION_PROMPT, and ADD-only means each dated instance is a separate retrievable memory. 'Where did I live before SF?' matches the past instance directly, which is why the benchmark rose from 51% to 93%.",
+          "category": "design"
+        },
+        {
+          "title": "Legacy two-call prompts still ship but are dormant",
+          "detail": "prompts.py still defines FACT_RETRIEVAL_PROMPT, USER/AGENT_MEMORY_EXTRACTION_PROMPT, DEFAULT_UPDATE_MEMORY_PROMPT and get_update_memory_messages, referenced only by memory/utils.py. They are NOT wired into the active _add_to_vector_store path, which uses only ADDITIVE_EXTRACTION_PROMPT. PROCEDURAL_MEMORY_SYSTEM_PROMPT remains live.",
+          "category": "deprecation"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "additive-extraction-prompt",
+          "label": "ADDITIVE_EXTRACTION_PROMPT",
+          "kind": "pattern"
+        },
+        {
+          "id": "single-pass-add-only",
+          "label": "Single-pass ADD-only extraction",
+          "kind": "algorithm"
+        },
+        {
+          "id": "add-to-vector-store",
+          "label": "_add_to_vector_store phased batch pipeline",
+          "kind": "algorithm"
+        },
+        {
+          "id": "score-and-rank",
+          "label": "score_and_rank score fusion",
+          "kind": "algorithm"
+        },
+        {
+          "id": "normalize-bm25",
+          "label": "normalize_bm25 / get_bm25_params",
+          "kind": "algorithm"
+        },
+        {
+          "id": "extract-entities",
+          "label": "extract_entities (spaCy entity extraction)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "lemmatize-for-bm25",
+          "label": "lemmatize_for_bm25",
+          "kind": "algorithm"
+        },
+        {
+          "id": "compute-entity-boosts",
+          "label": "_compute_entity_boosts (entity linking boost)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "entity-store",
+          "label": "Entity store collection ({collection}_entities)",
+          "kind": "service"
+        },
+        {
+          "id": "spacy-models-loader",
+          "label": "spacy_models shared loader (get_nlp_full/get_nlp_lemma)",
+          "kind": "module"
+        },
+        {
+          "id": "keyword-search-interface",
+          "label": "vector_store.keyword_search interface",
+          "kind": "interface"
+        },
+        {
+          "id": "agent-context-suffix",
+          "label": "AGENT_CONTEXT_SUFFIX (agent-scoped facts)",
+          "kind": "pattern"
+        },
+        {
+          "id": "search-vector-store",
+          "label": "_search_vector_store multi-signal retrieval",
+          "kind": "algorithm"
+        },
+        {
+          "id": "procedural-memory-prompt",
+          "label": "PROCEDURAL_MEMORY_SYSTEM_PROMPT",
+          "kind": "pattern"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "llms.html",
+          "embeddings.html",
+          "vector-stores.html",
+          "rerankers.html"
+        ],
+        "usedBy": [
+          "data-flow.html",
+          "memory-engine.html",
+          "client-sdk.html",
+          "server.html"
+        ],
+        "related": [
+          "graph-memory.html",
+          "evaluation.html",
+          "data-flow.html",
+          "memory-engine.html",
+          "config-system.html",
+          "surprises.html"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/configs/prompts.py",
+          "symbol": "ADDITIVE_EXTRACTION_PROMPT",
+          "note": "Active V3 ADD-only system prompt, generate_additive_extraction_prompt builder, AGENT_CONTEXT_SUFFIX, and dormant legacy prompts (FACT_RETRIEVAL_PROMPT, DEFAULT_UPDATE_MEMORY_PROMPT, PROCEDURAL_MEMORY_SYSTEM_PROMPT)"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "_add_to_vector_store",
+          "note": "Eight-phase ADD-only add pipeline: existing-memory retrieval with integer ID mapping, single LLM call, batch embed, MD5 hash dedup, batch insert, batch entity linking"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "_search_vector_store / _compute_entity_boosts / entity_store",
+          "note": "Multi-signal retrieval: lemmatize+entity preprocess, over-fetch semantic, keyword_search BM25, entity-store boost with spread attenuation, fusion via score_and_rank; lazy {collection}_entities store"
+        },
+        {
+          "path": "mem0/utils/scoring.py",
+          "symbol": "score_and_rank",
+          "note": "Additive score fusion with adaptive max_possible divisor (1.0/1.5/2.0/2.5), threshold gates semantic only; normalize_bm25 sigmoid; get_bm25_params query-length-adaptive params; ENTITY_BOOST_WEIGHT=0.5"
+        },
+        {
+          "path": "mem0/utils/entity_extraction.py",
+          "symbol": "extract_entities / extract_entities_batch",
+          "note": "spaCy-based extraction of PROPER/QUOTED/COMPOUND/NOUN entities with generic-head/adjective filtering, type-priority dedup, substring removal; returns [] if spaCy unavailable"
+        },
+        {
+          "path": "mem0/utils/lemmatization.py",
+          "symbol": "lemmatize_for_bm25",
+          "note": "Lemmatizer-only spaCy pipeline; drops stopwords/punct, keeps lemmas, also appends original -ing forms for noun/verb ambiguity; falls back to raw text"
+        },
+        {
+          "path": "mem0/utils/spacy_models.py",
+          "symbol": "get_nlp_full / get_nlp_lemma",
+          "note": "Thread-safe shared loader; auto-downloads en_core_web_sm; full pipeline for NER vs lemmatizer-only (disable ner,parser); sticky failure flags on missing spaCy"
+        },
+        {
+          "path": "mem0/vector_stores/base.py",
+          "symbol": "keyword_search / search_batch",
+          "note": "Optional keyword_search returns None (unsupported) by default; overridden by stores with native BM25/full-text. Qdrant uses fastembed sparse vectors using='bm25'"
+        },
+        {
+          "path": "pyproject.toml",
+          "symbol": "[project.optional-dependencies] nlp",
+          "note": "spacy>=3.7.0 is an optional [nlp] extra, not a core dependency"
+        },
+        {
+          "path": "docs/migration/oss-v2-to-v3.mdx",
+          "symbol": "How the New Algorithm Works",
+          "note": "Documents single-pass ADD-only rationale, accumulation model, graph-memory removal -> entity linking, deprecated custom_update_memory_prompt, ~3-4x token reduction"
+        }
+      ],
+      "searchTerms": [
+        "ADD-only extraction",
+        "single-pass memory algorithm",
+        "ADDITIVE_EXTRACTION_PROMPT",
+        "multi-signal hybrid retrieval",
+        "score fusion",
+        "score_and_rank",
+        "BM25 normalization sigmoid",
+        "lemmatize_for_bm25",
+        "entity linking",
+        "entity boost",
+        "_compute_entity_boosts",
+        "extract_entities spaCy",
+        "en_core_web_sm",
+        "mem0ai[nlp]",
+        "temporal reasoning observation date",
+        "semantic vector search",
+        "keyword_search",
+        "fastembed BM25 qdrant",
+        "memories accumulate no update delete",
+        "agent memory extraction",
+        "attributed_to",
+        "text_lemmatized",
+        "linked_memory_ids",
+        "entity store collection",
+        "v3 memory pipeline"
+      ]
+    },
+    {
+      "slug": "config-system",
+      "title": "Configuration System",
+      "summary": "mem0 is configuration-driven: a single Pydantic v2 MemoryConfig (in mem0/configs/base.py) aggregates four {provider, config} sub-config wrappers for the LLM, embedder, vector store, and optional reranker, plus scalar settings like history_db_path, version, and custom_instructions. Four factories in mem0/utils/factory.py (LlmFactory, EmbedderFactory, VectorStoreFactory, RerankerFactory) map provider strings to implementation class paths and lazily import them via load_class(), turning config dicts into live provider instances. The default stack is OpenAI LLM + embedder + local Qdrant, so a bare Memory() works with just OPENAI_API_KEY. Both nested-dict (Memory.from_config) and typed-object construction converge on the same validated tree.",
+      "surprises": [
+        {
+          "title": "MemoryConfig has custom_instructions, not custom_fact_extraction_prompt",
+          "detail": "The real model in mem0/configs/base.py exposes a single custom_instructions field for fact-extraction guidance. There is no custom_fact_extraction_prompt or custom_update_memory_prompt field on MemoryConfig; custom_update_memory_prompt exists only as a parameter of get_update_memory_messages() in mem0/configs/prompts.py. At add() time a per-call prompt= argument overrides it (custom_instr = prompt or self.custom_instructions).",
+          "category": "gotcha"
+        },
+        {
+          "title": "No graph_store in MemoryConfig — graph memory removed from OSS core",
+          "detail": "MemoryConfig has no graph_store field. Graph memory is deprecated/removed; entity linking via a lazily-built per-collection entity store ({collection}_entities) through VectorStoreFactory replaces it.",
+          "category": "deprecation"
+        },
+        {
+          "title": "Asymmetric wrappers: only VectorStoreConfig eagerly types its inner config",
+          "detail": "LlmConfig and EmbedderConfig keep their inner config as a raw dict (field_validator only checks the provider name). VectorStoreConfig's @model_validator(mode='after') immediately imports and instantiates the typed provider config class (e.g. QdrantConfig), which is why the engine can read self.config.vector_store.config.collection_name as an attribute while LLM/embedder configs stay dicts until factory time.",
+          "category": "design"
+        },
+        {
+          "title": "BaseLlmConfig->provider config re-projection silently drops reasoning_effort",
+          "detail": "In LlmFactory.create, when a BaseLlmConfig object (not a dict) is converted to a provider-specific config, only a fixed list of common attributes is copied (model, temperature, api_key, max_tokens, top_p, top_k, enable_vision, vision_details, http_client_proxies). reasoning_effort is NOT in that list, so passing a base config object can lose it; the dict path is safe because it spreads the whole dict.",
+          "category": "gotcha"
+        },
+        {
+          "title": "EmbedderFactory returns MockEmbeddings for Upstash self-embedding",
+          "detail": "EmbedderFactory.create takes a third vector_config argument; when provider is upstash_vector and vector_config.enable_embeddings is true, it returns a no-op MockEmbeddings() instead of a real embedder, because Upstash performs embedding server-side.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Dict vs object configs differ for file-backed vector stores",
+          "detail": "VectorStoreConfig's validator injects a default path=/tmp/{provider} only when config is a dict and the provider config class declares a 'path' annotation. If you pass an already-constructed provider-config object, that path injection is skipped — so dict-style and object-style configs are not perfectly interchangeable for file-backed stores.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Lazy SDK imports keep config construction cheap",
+          "detail": "Because all provider SDK imports are deferred to load_class() (importlib) at factory time, importing mem0 and building a MemoryConfig is cheap regardless of how many backends are installed; you only pay import cost for providers you actually instantiate.",
+          "category": "performance"
+        },
+        {
+          "title": "RerankerFactory points at mem0.reranker.* (singular)",
+          "detail": "While reranker config classes live under mem0/configs/rerankers/ (plural), RerankerFactory implementation paths reference the singular mem0.reranker.* package, e.g. mem0.reranker.cohere_reranker.CohereReranker.",
+          "category": "gotcha"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "memory-config",
+          "label": "MemoryConfig",
+          "kind": "class"
+        },
+        {
+          "id": "llm-config",
+          "label": "LlmConfig",
+          "kind": "class"
+        },
+        {
+          "id": "embedder-config",
+          "label": "EmbedderConfig",
+          "kind": "class"
+        },
+        {
+          "id": "vector-store-config",
+          "label": "VectorStoreConfig",
+          "kind": "class"
+        },
+        {
+          "id": "reranker-config",
+          "label": "RerankerConfig",
+          "kind": "class"
+        },
+        {
+          "id": "base-llm-config",
+          "label": "BaseLlmConfig",
+          "kind": "class"
+        },
+        {
+          "id": "base-embedder-config",
+          "label": "BaseEmbedderConfig",
+          "kind": "class"
+        },
+        {
+          "id": "llm-factory",
+          "label": "LlmFactory",
+          "kind": "class"
+        },
+        {
+          "id": "embedder-factory",
+          "label": "EmbedderFactory",
+          "kind": "class"
+        },
+        {
+          "id": "vector-store-factory",
+          "label": "VectorStoreFactory",
+          "kind": "class"
+        },
+        {
+          "id": "reranker-factory",
+          "label": "RerankerFactory",
+          "kind": "class"
+        },
+        {
+          "id": "load-class",
+          "label": "load_class (importlib dispatch)",
+          "kind": "pattern"
+        },
+        {
+          "id": "memory-type-enum",
+          "label": "MemoryType enum",
+          "kind": "concept"
+        },
+        {
+          "id": "azure-config",
+          "label": "AzureConfig",
+          "kind": "class"
+        },
+        {
+          "id": "from-config",
+          "label": "Memory.from_config",
+          "kind": "pattern"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "llms",
+          "embeddings",
+          "vector-stores",
+          "rerankers"
+        ],
+        "usedBy": [
+          "memory-engine",
+          "data-flow",
+          "memory-algorithm",
+          "server",
+          "client-sdk"
+        ],
+        "related": [
+          "architecture",
+          "graph-memory",
+          "surprises",
+          "glossary"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/configs/base.py",
+          "symbol": "MemoryConfig",
+          "note": "Root Pydantic model: vector_store, llm, embedder, reranker, history_db_path, version, custom_instructions; also AzureConfig and MemoryItem"
+        },
+        {
+          "path": "mem0/configs/enums.py",
+          "symbol": "MemoryType",
+          "note": "Single enum (SEMANTIC/EPISODIC/PROCEDURAL); not used for provider selection"
+        },
+        {
+          "path": "mem0/utils/factory.py",
+          "symbol": "LlmFactory, EmbedderFactory, VectorStoreFactory, RerankerFactory, load_class",
+          "note": "The four factories + provider_to_class maps (18/11/24/5 providers) and lazy importlib dispatch"
+        },
+        {
+          "path": "mem0/llms/configs.py",
+          "symbol": "LlmConfig",
+          "note": "{provider, config} wrapper, default openai, field_validator allow-list of 18 providers"
+        },
+        {
+          "path": "mem0/embeddings/configs.py",
+          "symbol": "EmbedderConfig",
+          "note": "{provider, config} wrapper, default openai, allow-list of 11 providers"
+        },
+        {
+          "path": "mem0/vector_stores/configs.py",
+          "symbol": "VectorStoreConfig",
+          "note": "default qdrant; model_validator(after) imports+instantiates typed provider config, injects /tmp/{provider} path"
+        },
+        {
+          "path": "mem0/configs/llms/base.py",
+          "symbol": "BaseLlmConfig",
+          "note": "ABC with common LLM params; 9 dedicated subclasses (anthropic, aws_bedrock, azure, deepseek, lmstudio, minimax, ollama, openai, vllm)"
+        },
+        {
+          "path": "mem0/configs/embeddings/base.py",
+          "symbol": "BaseEmbedderConfig",
+          "note": "Single kitchen-sink ABC for all embedders; no per-provider config files"
+        },
+        {
+          "path": "mem0/configs/rerankers/config.py",
+          "symbol": "RerankerConfig",
+          "note": "Wrapper with model_config extra=forbid; distinct from per-provider BaseRerankerConfig subclasses"
+        },
+        {
+          "path": "mem0/configs/vector_stores/qdrant.py",
+          "symbol": "QdrantConfig",
+          "note": "Example typed provider config with validate_extra_fields and host/port/path/url validation"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory.__init__ / from_config",
+          "note": "Consumes MemoryConfig: calls the four factories, derives collection_name, builds telemetry + lazy entity store"
+        }
+      ],
+      "searchTerms": [
+        "MemoryConfig",
+        "mem0 configuration",
+        "provider config",
+        "LlmFactory",
+        "EmbedderFactory",
+        "VectorStoreFactory",
+        "RerankerFactory",
+        "load_class",
+        "provider_to_class",
+        "LlmConfig",
+        "EmbedderConfig",
+        "VectorStoreConfig",
+        "RerankerConfig",
+        "BaseLlmConfig",
+        "BaseEmbedderConfig",
+        "QdrantConfig",
+        "custom_instructions",
+        "history_db_path",
+        "default provider openai qdrant",
+        "Memory.from_config",
+        "dict vs object config",
+        "Pydantic v2 field_validator model_validator",
+        "MemoryType enum",
+        "AzureConfig",
+        "factory dispatch",
+        "register_provider",
+        "MockEmbeddings upstash"
+      ]
+    },
+    {
+      "slug": "llms",
+      "title": "LLM Providers",
+      "summary": "The LLM layer is a plugin family where every provider subclasses LLMBase and implements one generate_response method returning a string or a normalised tool-call dict. There are 18 provider implementations spanning OpenAI-compatible APIs, native Anthropic/Gemini/Bedrock SDKs, local runtimes (Ollama, LM Studio, vLLM), and aggregators (LiteLLM, LangChain), wired by LlmFactory. The default is the openai provider on gpt-5-mini. Structured output is handled primarily via response_format JSON mode, with dedicated openai_structured/azure_openai_structured variants for schema-validated parsing.",
+      "surprises": [
+        {
+          "title": "Abstract signature omits response_format but every provider declares it",
+          "detail": "LLMBase.generate_response declares only (messages, tools, tool_choice, **kwargs), yet the engine always calls it with response_format={'type':'json_object'}. Concrete providers add response_format explicitly; SarvamLLM accepts it only to ignore it.",
+          "category": "gotcha"
+        },
+        {
+          "title": "xai and sarvam silently drop tools/tool_choice",
+          "detail": "XAILLM and SarvamLLM generate_response signatures have no tool parameters, so any tool-calling caller gets plain text. They still work for memory extraction because the algorithm uses response_format JSON, not tools.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Two *_structured providers, but only one uses the beta parse endpoint",
+          "detail": "OpenAIStructuredLLM calls client.beta.chat.completions.parse for schema validation, but AzureOpenAIStructuredLLM still calls chat.completions.create — it is effectively a leaner copy of AzureOpenAILLM, not a true structured-parse path.",
+          "category": "design"
+        },
+        {
+          "title": "AWS Bedrock pings the control plane during construction",
+          "detail": "AWSBedrockLLM.__init__ calls list_foundation_models to validate region/model, adding a network round-trip to Memory() setup for Bedrock users (failures downgraded to a warning).",
+          "category": "performance"
+        },
+        {
+          "title": "OpenAI store param is opt-in to protect compatible backends",
+          "detail": "OpenAILLM only sends 'store' when explicitly configured, because OpenAI-compatible backends (Gemini, Groq, vLLM via the OpenAI client) reject unknown fields.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Anthropic and Bedrock omit top_p when temperature is set",
+          "detail": "Both the native AnthropicLLM and AWSBedrockLLM (_build_inference_config) drop top_p/topP when temperature is present, because Anthropic and MiniMax reasoning models raise a ValidationException if both are sent.",
+          "category": "correctness"
+        },
+        {
+          "title": "extract_json salvages dirty/fenced JSON from weak models",
+          "detail": "Tool arguments and JSON bodies pass through mem0.memory.utils.extract_json before json.loads, recovering JSON wrapped in markdown fences or prose — a recurring failure mode for small/local models. Bedrock even round-trips dict input through it.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Lazy string-path imports make SDKs optional",
+          "detail": "LlmFactory stores class paths as strings and importlib-loads them on demand; each native-SDK provider wraps its import in try/except ImportError with a pip-install hint, so you only install SDKs for providers you use.",
+          "category": "design"
+        },
+        {
+          "title": "gpt-5-mini default is deliberately NOT treated as a reasoning model",
+          "detail": "_is_reasoning_model matches exact gpt-5/gpt-5o names and o1-/o3- prefixes but deliberately excludes gpt-5.x variants like gpt-5.4-mini, which support temperature. The default gpt-5-mini therefore goes through full sampling params.",
+          "category": "correctness"
+        },
+        {
+          "title": "Azure providers rewrite the word 'assistant' to 'ai' in the last message",
+          "detail": "Both AzureOpenAILLM and AzureOpenAIStructuredLLM replace the literal substring 'assistant' with 'ai' in the final user message before sending — an undocumented behavioral quirk that can mangle legitimate content.",
+          "category": "gotcha"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "llm-base",
+          "label": "LLMBase",
+          "kind": "class"
+        },
+        {
+          "id": "base-llm-config",
+          "label": "BaseLlmConfig",
+          "kind": "class"
+        },
+        {
+          "id": "llm-factory",
+          "label": "LlmFactory",
+          "kind": "pattern"
+        },
+        {
+          "id": "openai-llm",
+          "label": "OpenAILLM",
+          "kind": "provider"
+        },
+        {
+          "id": "anthropic-llm",
+          "label": "AnthropicLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "aws-bedrock-llm",
+          "label": "AWSBedrockLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "gemini-llm",
+          "label": "GeminiLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "openai-structured-llm",
+          "label": "OpenAIStructuredLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "azure-openai-llm",
+          "label": "AzureOpenAILLM",
+          "kind": "provider"
+        },
+        {
+          "id": "litellm-provider",
+          "label": "LiteLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "langchain-llm",
+          "label": "LangchainLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "ollama-llm",
+          "label": "OllamaLLM",
+          "kind": "provider"
+        },
+        {
+          "id": "generate-response",
+          "label": "generate_response contract",
+          "kind": "interface"
+        },
+        {
+          "id": "structured-output",
+          "label": "Structured output / JSON mode",
+          "kind": "concept"
+        },
+        {
+          "id": "extract-json",
+          "label": "extract_json normalisation",
+          "kind": "algorithm"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "config-system",
+          "memory-algorithm"
+        ],
+        "usedBy": [
+          "memory-engine",
+          "data-flow",
+          "rerankers",
+          "client-sdk"
+        ],
+        "related": [
+          "embeddings",
+          "vector-stores",
+          "architecture",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/llms/base.py",
+          "symbol": "LLMBase",
+          "note": "Abstract base: generate_response contract, reasoning-model param filtering (_is_reasoning_model, _get_supported_params), _get_common_params"
+        },
+        {
+          "path": "mem0/configs/llms/base.py",
+          "symbol": "BaseLlmConfig",
+          "note": "Shared non-Pydantic config: model/temperature/max_tokens/top_p/top_k/reasoning_effort/http proxies and defaults"
+        },
+        {
+          "path": "mem0/llms/configs.py",
+          "symbol": "LlmConfig",
+          "note": "Pydantic provider+config wrapper with validate_config allow-list of 18 provider names"
+        },
+        {
+          "path": "mem0/utils/factory.py",
+          "symbol": "LlmFactory.provider_to_class",
+          "note": "Maps 18 provider keys to (class_path, config_class); lazy importlib loading"
+        },
+        {
+          "path": "mem0/llms/openai.py",
+          "symbol": "OpenAILLM",
+          "note": "Default provider; OpenRouter support, opt-in store param, _parse_response tool-call shape, default gpt-5-mini"
+        },
+        {
+          "path": "mem0/llms/anthropic.py",
+          "symbol": "AnthropicLLM",
+          "note": "Native Messages API; system-message split; drops top_p when temperature set"
+        },
+        {
+          "path": "mem0/llms/aws_bedrock.py",
+          "symbol": "AWSBedrockLLM",
+          "note": "Multi-family Converse/invoke_model routing, capability gating, startup list_foundation_models check"
+        },
+        {
+          "path": "mem0/llms/openai_structured.py",
+          "symbol": "OpenAIStructuredLLM",
+          "note": "Uses beta.chat.completions.parse for schema-validated structured output"
+        },
+        {
+          "path": "mem0/llms/azure_openai_structured.py",
+          "symbol": "AzureOpenAIStructuredLLM",
+          "note": "Structured Azure variant that still calls chat.completions.create; assistant->ai rewrite"
+        },
+        {
+          "path": "mem0/llms/gemini.py",
+          "symbol": "GeminiLLM",
+          "note": "google.genai; strips additionalProperties from tool schemas; FunctionCallingConfigMode mapping; JSON via response_mime_type"
+        },
+        {
+          "path": "mem0/llms/litellm.py",
+          "symbol": "LiteLLM",
+          "note": "litellm.completion aggregator; supports_function_calling pre-check"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "generate_response call",
+          "note": "Engine builds LLM via LlmFactory.create and calls generate_response with response_format json_object"
+        }
+      ],
+      "searchTerms": [
+        "LLMBase",
+        "generate_response",
+        "LlmFactory",
+        "provider_to_class",
+        "BaseLlmConfig",
+        "response_format",
+        "tool_choice",
+        "openai_structured",
+        "azure_openai_structured",
+        "gpt-5-mini default model",
+        "extract_json",
+        "reasoning model gpt-5 o1 o3",
+        "AWS Bedrock Converse",
+        "Anthropic top_p temperature",
+        "OpenRouter",
+        "Ollama JSON format",
+        "vLLM lmstudio",
+        "litellm langchain aggregator",
+        "tool calling normalised dict",
+        "structured output JSON mode"
+      ]
+    },
+    {
+      "slug": "embeddings",
+      "title": "Embedding Providers",
+      "summary": "The embeddings layer converts text into dense vectors via a single abstract contract, EmbeddingBase.embed(text, memory_action), implemented by 11 real providers (plus a 10-dim MockEmbeddings for tests) and wired by EmbedderFactory from a declarative EmbedderConfig. It defaults to OpenAI text-embedding-3-small at 1536 dims. A key seam: the embedder's embedding_dims and the vector store's embedding_model_dims are separate, non-auto-synced fields that both default to 1536 — switching to a non-1536 model requires updating the vector store config by hand. Only Vertex AI uses the memory_action argument (mapping add/update/search to RETRIEVAL_DOCUMENT/RETRIEVAL_QUERY task types).",
+      "surprises": [
+        {
+          "title": "Two unsynced dimension fields",
+          "detail": "embedder.config.embedding_dims and vector_store.config.embedding_model_dims are independent. Nothing in MemoryConfig copies one into the other; both happen to default to 1536. Choosing a non-1536 model (Gemini 768, Vertex 256, FastEmbed/HF auto-detect) without also setting embedding_model_dims creates a wrong-width index and breaks inserts.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Only Vertex AI uses memory_action",
+          "detail": "The engine tags every embed() call with add/search/update, but of 11 providers only VertexAIEmbedding branches on it (RETRIEVAL_DOCUMENT vs RETRIEVAL_QUERY vs SEMANTIC_SIMILARITY). The argument is plumbed everywhere as a forward-looking hook; the other 10 providers accept and ignore it.",
+          "category": "design"
+        },
+        {
+          "title": "OpenAI/Azure batch re-sorts by response index",
+          "detail": "embed_batch overrides for OpenAI and Azure chunk into batches of 100 and re-sort response.data by .index before returning, because the embeddings API does not guarantee output order matches input order. A naive list comprehension would silently misalign vectors with their source texts.",
+          "category": "correctness"
+        },
+        {
+          "title": "Ollama can pip-install itself at import",
+          "detail": "If the ollama package is missing, the module prompts input('Install it now? [y/N]') and runs pip install via subprocess at import time. In a non-interactive server this blocks on stdin or installs packages at runtime.",
+          "category": "security"
+        },
+        {
+          "title": "Empty package __init__.py enables lazy SDK loading",
+          "detail": "mem0/embeddings/__init__.py is 0 bytes; nothing is re-exported. The factory loads each provider by fully-qualified string path via importlib, so importing mem0.embeddings never pulls heavy SDKs (boto3, sentence-transformers, google-genai).",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Abstract embed() signature lacks the default every subclass adds",
+          "detail": "EmbeddingBase.embed declares memory_action as a required positional with no default, but all 11 concrete providers redeclare it as =None. A custom subclass copying the base signature literally would break call sites that omit the argument.",
+          "category": "gotcha"
+        },
+        {
+          "title": "MockEmbeddings makes all memories identical",
+          "detail": "MockEmbeddings.embed always returns the same fixed 10-dim vector, so cosine similarity between any two memories is 1.0 and ranking is meaningless. Fine for plumbing tests, useless for retrieval-quality tests. Also used as the no-op stand-in for Upstash server-side embedding.",
+          "category": "gotcha"
+        },
+        {
+          "title": "OPENAI_API_BASE deprecated",
+          "detail": "OpenAIEmbedding emits a DeprecationWarning for the OPENAI_API_BASE env var, slated for removal in 0.1.80; OPENAI_BASE_URL is the replacement.",
+          "category": "deprecation"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "embedding-base",
+          "label": "EmbeddingBase",
+          "kind": "class"
+        },
+        {
+          "id": "base-embedder-config",
+          "label": "BaseEmbedderConfig",
+          "kind": "class"
+        },
+        {
+          "id": "embedder-config",
+          "label": "EmbedderConfig",
+          "kind": "class"
+        },
+        {
+          "id": "embedder-factory",
+          "label": "EmbedderFactory",
+          "kind": "pattern"
+        },
+        {
+          "id": "openai-embedding",
+          "label": "OpenAIEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "azure-openai-embedding",
+          "label": "AzureOpenAIEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "google-genai-embedding",
+          "label": "GoogleGenAIEmbedding (Gemini)",
+          "kind": "provider"
+        },
+        {
+          "id": "vertexai-embedding",
+          "label": "VertexAIEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "huggingface-embedding",
+          "label": "HuggingFaceEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "fastembed-embedding",
+          "label": "FastEmbedEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "ollama-embedding",
+          "label": "OllamaEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "langchain-embedding",
+          "label": "LangchainEmbedding",
+          "kind": "provider"
+        },
+        {
+          "id": "mock-embeddings",
+          "label": "MockEmbeddings",
+          "kind": "provider"
+        },
+        {
+          "id": "memory-action",
+          "label": "memory_action (action-aware embeddings)",
+          "kind": "concept"
+        },
+        {
+          "id": "embedding-dims-flow",
+          "label": "embedding_dims vs embedding_model_dims",
+          "kind": "concept"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "config-system",
+          "vector-stores"
+        ],
+        "usedBy": [
+          "memory-engine",
+          "memory-algorithm",
+          "data-flow"
+        ],
+        "related": [
+          "llms",
+          "rerankers",
+          "architecture",
+          "server"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/embeddings/base.py",
+          "symbol": "EmbeddingBase",
+          "note": "Abstract contract: embed() abstract method + embed_batch() concrete sequential default; memory_action Literal['add','search','update']"
+        },
+        {
+          "path": "mem0/embeddings/configs.py",
+          "symbol": "EmbedderConfig",
+          "note": "Pydantic wrapper with provider default 'openai' and field_validator allow-list of the 11 supported providers"
+        },
+        {
+          "path": "mem0/configs/embeddings/base.py",
+          "symbol": "BaseEmbedderConfig",
+          "note": "Plain ABC fat config flattening all provider options; embedding_dims field; per-provider base_url/credentials fields"
+        },
+        {
+          "path": "mem0/embeddings/__init__.py",
+          "note": "Empty (0 bytes) — no package-level exports; enables lazy provider loading"
+        },
+        {
+          "path": "mem0/utils/factory.py",
+          "symbol": "EmbedderFactory",
+          "note": "provider_to_class map (11 entries), create() with importlib lazy load and Upstash MockEmbeddings special-case"
+        },
+        {
+          "path": "mem0/embeddings/openai.py",
+          "symbol": "OpenAIEmbedding",
+          "note": "Default text-embedding-3-small/1536; conditional dimensions param; native embed_batch chunked at 100 with index re-sort; OPENAI_API_BASE deprecation"
+        },
+        {
+          "path": "mem0/embeddings/vertexai.py",
+          "symbol": "VertexAIEmbedding",
+          "note": "Only provider that uses memory_action; maps actions to RETRIEVAL_DOCUMENT/RETRIEVAL_QUERY task types"
+        },
+        {
+          "path": "mem0/embeddings/langchain.py",
+          "symbol": "LangchainEmbedding",
+          "note": "Passthrough adapter; config.model must be a langchain Embeddings instance; calls embed_query()"
+        },
+        {
+          "path": "mem0/embeddings/mock.py",
+          "symbol": "MockEmbeddings",
+          "note": "Returns constant 10-dim vector; used in tests and Upstash server-side-embedding path"
+        },
+        {
+          "path": "mem0/embeddings/ollama.py",
+          "symbol": "OllamaEmbedding",
+          "note": "Interactive pip-install prompt at import; auto-pulls model; default nomic-embed-text/512"
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory.__init__",
+          "note": "Constructs embedder and vector store independently via factories; embed()/embed_batch() call sites pass memory_action add/search/update"
+        }
+      ],
+      "searchTerms": [
+        "embedding provider",
+        "EmbeddingBase",
+        "embed",
+        "embed_batch",
+        "memory_action",
+        "EmbedderConfig",
+        "BaseEmbedderConfig",
+        "EmbedderFactory",
+        "embedding_dims",
+        "embedding_model_dims",
+        "text-embedding-3-small",
+        "OpenAI embeddings",
+        "Azure OpenAI embeddings",
+        "Gemini embedding",
+        "Vertex AI embedding",
+        "HuggingFace SentenceTransformer",
+        "fastembed",
+        "ollama embedding",
+        "LM Studio embedding",
+        "together embedding",
+        "AWS Bedrock titan",
+        "langchain embeddings passthrough",
+        "MockEmbeddings",
+        "vector dimensions mismatch",
+        "RETRIEVAL_DOCUMENT RETRIEVAL_QUERY",
+        "default embedder model"
+      ]
+    },
+    {
+      "slug": "vector-stores",
+      "title": "Vector Stores",
+      "summary": "The vector store layer persists each mem0 memory as a dense embedding plus a flat JSON payload across 24 pluggable backends behind one abstract interface, VectorStoreBase. Stores share an insert/search/get/list/delete/update contract plus collection lifecycle ops, and an enhanced filter dialect (comparison, list, string, and AND/OR/NOT logical operators) that each provider translates natively. Qdrant is the default and richest implementation with hybrid dense + BM25 sparse search; pgvector ships rich SQL filter operators; 15 of 24 providers add native keyword/BM25 search consumed by the hybrid retrieval algorithm.",
+      "surprises": [
+        {
+          "title": "keyword_search returns None as a sentinel, not []",
+          "detail": "VectorStoreBase.keyword_search defaults to returning None to signal 'not supported'. The engine checks `if keyword_results is not None` before fusing BM25 scores, so unsupported stores silently degrade to semantic-only. Returning [] would falsely claim support with zero hits.",
+          "category": "gotcha"
+        },
+        {
+          "title": "No shared result class; results are duck-typed",
+          "detail": "There is no single OutputData. ~20 providers each define a local OutputData(BaseModel) with id/score/payload, Redis uses MemoryResult, and Qdrant returns native qdrant_client point objects. The engine reads .id/.score/.payload by attribute.",
+          "category": "design"
+        },
+        {
+          "title": "list() return nesting is inconsistent across stores",
+          "detail": "pgvector/turbopuffer/redis return doubly-nested [[OutputData,...]], Qdrant's list() returns the raw scroll() tuple (points, next_offset), while search() returns a flat list. Callers must know which method they called.",
+          "category": "gotcha"
+        },
+        {
+          "title": "pgvector boolean filter casing fix",
+          "detail": "PR #5264 serializes boolean filter values with json.dumps (true/false) instead of Python str (True/False) so they match JSONB storage. Same PR added LIKE wildcard escaping (\\, %, _ + ESCAPE) and TS scalar coercion; earlier #4997 closed SQL injection via psycopg.sql.Identifier and bound params.",
+          "category": "security"
+        },
+        {
+          "title": "Score sign/scale is not normalized across stores",
+          "detail": "pgvector returns cosine distance (lower=closer), turbopuffer returns 1 - dist, Redis returns raw vector_distance. Raw .score values are not comparable across backends; the engine's fusion accounts for this.",
+          "category": "correctness"
+        },
+        {
+          "title": "Qdrant pre-v3 collections cannot do BM25",
+          "detail": "Collections created before hybrid search lack the named 'bm25' sparse slot; writing into them is rejected ('Not existing vector name error: bm25'). Qdrant detects this via _has_bm25_slot on init, warns, and disables BM25 (semantic still works). fastembed is optional and lazy-loaded.",
+          "category": "gotcha"
+        },
+        {
+          "title": "FAISS filters via in-memory post-filtering",
+          "detail": "FAISS has no server-side filter engine: it over-fetches (fetch_k = top_k*2) then runs _apply_filters in Python, so filtered searches can under-return when matches fall outside the over-fetch window.",
+          "category": "correctness"
+        },
+        {
+          "title": "Only Qdrant overrides search_batch",
+          "detail": "The base search_batch loops over search() sequentially. Qdrant is the sole store with a native batched implementation (query_batch_points) plus a sequential fallback on error.",
+          "category": "performance"
+        },
+        {
+          "title": "text_lemmatized is precomputed at write time",
+          "detail": "The engine writes a lemmatized copy of the memory text into the payload at insert, so keyword/BM25 search only lemmatizes the query at read time rather than re-tokenizing the corpus, keeping hybrid search cheap enough to run on every search().",
+          "category": "performance"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "vector-store-base",
+          "label": "VectorStoreBase",
+          "kind": "interface"
+        },
+        {
+          "id": "vector-store-factory",
+          "label": "VectorStoreFactory",
+          "kind": "pattern"
+        },
+        {
+          "id": "vector-store-config",
+          "label": "VectorStoreConfig",
+          "kind": "class"
+        },
+        {
+          "id": "qdrant-store",
+          "label": "Qdrant (default store)",
+          "kind": "provider"
+        },
+        {
+          "id": "pgvector-store",
+          "label": "PGVector",
+          "kind": "provider"
+        },
+        {
+          "id": "redis-store",
+          "label": "RedisDB",
+          "kind": "provider"
+        },
+        {
+          "id": "faiss-store",
+          "label": "FAISS",
+          "kind": "provider"
+        },
+        {
+          "id": "turbopuffer-store",
+          "label": "TurbopufferDB",
+          "kind": "provider"
+        },
+        {
+          "id": "output-data",
+          "label": "OutputData result shape",
+          "kind": "class"
+        },
+        {
+          "id": "filter-dialect",
+          "label": "Enhanced filter dialect (AND/OR/NOT + operators)",
+          "kind": "pattern"
+        },
+        {
+          "id": "keyword-search",
+          "label": "keyword_search / BM25 hybrid",
+          "kind": "algorithm"
+        },
+        {
+          "id": "payload-model",
+          "label": "Memory payload model",
+          "kind": "concept"
+        },
+        {
+          "id": "operator-sql-map",
+          "label": "OPERATOR_SQL_MAP (pgvector filter translation)",
+          "kind": "pattern"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "embeddings",
+          "config-system"
+        ],
+        "usedBy": [
+          "memory-engine",
+          "memory-algorithm",
+          "data-flow",
+          "server",
+          "openmemory"
+        ],
+        "related": [
+          "llms",
+          "rerankers",
+          "architecture",
+          "graph-memory",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/vector_stores/base.py",
+          "symbol": "VectorStoreBase",
+          "note": "Abstract interface: insert/search/get/list/delete/update, create_col/list_cols/delete_col/col_info, reset; default keyword_search (returns None) and search_batch."
+        },
+        {
+          "path": "mem0/vector_stores/configs.py",
+          "symbol": "VectorStoreConfig",
+          "note": "Provider->config-class map (_provider_configs, 24 entries), validate_and_create_config validator, /tmp/<provider> path default injection."
+        },
+        {
+          "path": "mem0/utils/factory.py",
+          "symbol": "VectorStoreFactory",
+          "note": "provider_to_class map (24 entries) + create()/reset(); lazy load_class instantiation from config.model_dump()."
+        },
+        {
+          "path": "mem0/vector_stores/qdrant.py",
+          "symbol": "Qdrant",
+          "note": "Default store; hybrid dense+BM25 sparse (fastembed Qdrant/bm25), _create_filter / _build_field_condition operator translation, native search_batch, _has_bm25_slot v3 detection, payload indexes."
+        },
+        {
+          "path": "mem0/vector_stores/pgvector.py",
+          "symbol": "OPERATOR_SQL_MAP / _build_filter_conditions / PGVector",
+          "note": "Rich SQL filter operators over JSONB payload, $or/$not handling, boolean casing + LIKE escaping fixes, PG full-text keyword_search on text_lemmatized, HNSW/DiskANN indexes."
+        },
+        {
+          "path": "mem0/vector_stores/redis.py",
+          "symbol": "RedisDB / MemoryResult",
+          "note": "Fixed schema + JSON metadata blob, integer epoch timestamps, RediSearch TextQuery keyword_search, tag-based filters via redisvl."
+        },
+        {
+          "path": "mem0/vector_stores/faiss.py",
+          "symbol": "FAISS / _apply_filters",
+          "note": "Local brute-force index, in-memory post-filtering with over-fetch, JSON docstore with safe-unpickle migration."
+        },
+        {
+          "path": "mem0/vector_stores/turbopuffer.py",
+          "symbol": "TurbopufferDB / _convert_filters",
+          "note": "Recently added provider; tuple filter format limited to eq/gte/lte, implicit namespace creation, score = 1 - dist."
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "_process_metadata_filters / _search_vector_store",
+          "note": "Engine-side filter normalization (OR->$or, NOT->$not), payload construction (data/hash/text_lemmatized), and hybrid search orchestration calling search + keyword_search."
+        }
+      ],
+      "searchTerms": [
+        "vector store",
+        "VectorStoreBase",
+        "VectorStoreFactory",
+        "qdrant default",
+        "pgvector filter operators",
+        "OPERATOR_SQL_MAP",
+        "keyword_search BM25",
+        "hybrid search",
+        "metadata filters AND OR NOT",
+        "OutputData",
+        "payload model",
+        "text_lemmatized",
+        "insert search delete update",
+        "create_col reset",
+        "turbopuffer redis faiss",
+        "embedding dims",
+        "provider plugin",
+        "$or $not filters",
+        "search_batch",
+        "fastembed bm25 sparse"
+      ]
+    },
+    {
+      "slug": "rerankers",
+      "title": "Rerankers",
+      "summary": "The reranker layer is an optional, opt-in second-stage scorer that re-orders candidate memories returned by mem0's multi-signal retrieval before they are returned to the caller. Every provider subclasses BaseReranker and implements a single rerank(query, documents, top_k) method that attaches a rerank_score and returns documents sorted descending. Five providers ship (cohere, sentence_transformer, huggingface, llm_reranker, zero_entropy) spanning hosted APIs, local cross-encoders, and LLM-as-judge. Reranking runs only when a reranker is configured in MemoryConfig.reranker AND the caller passes rerank=True to search().",
+      "surprises": [
+        {
+          "title": "Two independent guards gate reranking",
+          "detail": "Reranking runs only if BOTH a reranker is configured (MemoryConfig.reranker non-None) AND search(rerank=True) is passed. Either alone is a silent no-op, and an empty result set also short-circuits it (and original_memories).",
+          "category": "gotcha"
+        },
+        {
+          "title": "Silent provider-level fallback to rerank_score 0.0",
+          "detail": "Every provider wraps scoring in bare except Exception and falls back to the original order with rerank_score=0.0 (LLMReranker uses 0.5 per-document). Failures are silent; uniform 0.0 scores mean reranking failed and you are seeing unreranked order.",
+          "category": "correctness"
+        },
+        {
+          "title": "rerank_score scales are not comparable across providers",
+          "detail": "Cohere/ZeroEntropy return API relevance scores, LLMReranker returns 0.0-1.0 judged scores, SentenceTransformer returns raw unbounded cross-encoder logits, HuggingFace optionally min-max normalises to [0,1]. No common scale.",
+          "category": "gotcha"
+        },
+        {
+          "title": "LLMReranker makes N LLM calls per search",
+          "detail": "It scores each candidate document with a separate synchronous LLM call, making it by far the slowest/most expensive provider; best for small pools or offline eval.",
+          "category": "performance"
+        },
+        {
+          "title": "LLMReranker prompt-injection hardening",
+          "detail": "Truncates query and document to _MAX_INPUT_LEN=4000 chars and sends instructions as a system message with user data in the user role so memory text cannot override scoring instructions.",
+          "category": "security"
+        },
+        {
+          "title": "scoring_prompt is deprecated on LLMRerankerConfig",
+          "detail": "If supplied, it is now used as the system message and emits a DeprecationWarning; the built-in banded rubric prompt is preferred.",
+          "category": "deprecation"
+        },
+        {
+          "title": "__init__.py export set is incomplete",
+          "detail": "mem0/reranker/__init__.py only re-exports BaseReranker, CohereReranker, SentenceTransformerReranker. The other three providers work via the factory's lazy dotted-path import but are absent from __all__, so count the *_reranker.py files (five) for the true set.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Provider keys differ from class/file names",
+          "detail": "Factory keys are llm_reranker (not llm) and sentence_transformer (singular). A wrong key raises ValueError: Unsupported reranker provider.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Cohere trusts API order, ZeroEntropy re-sorts client-side",
+          "detail": "CohereReranker relies on the API's returned order and top_n, while ZeroEntropyReranker explicitly re-sorts the results descending and applies top_k itself despite calling a similar rerank API.",
+          "category": "design"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "base-reranker",
+          "label": "BaseReranker",
+          "kind": "interface"
+        },
+        {
+          "id": "reranker-factory",
+          "label": "RerankerFactory",
+          "kind": "pattern"
+        },
+        {
+          "id": "cohere-reranker",
+          "label": "CohereReranker",
+          "kind": "provider"
+        },
+        {
+          "id": "sentence-transformer-reranker",
+          "label": "SentenceTransformerReranker",
+          "kind": "provider"
+        },
+        {
+          "id": "huggingface-reranker",
+          "label": "HuggingFaceReranker",
+          "kind": "provider"
+        },
+        {
+          "id": "llm-reranker",
+          "label": "LLMReranker",
+          "kind": "provider"
+        },
+        {
+          "id": "zero-entropy-reranker",
+          "label": "ZeroEntropyReranker",
+          "kind": "provider"
+        },
+        {
+          "id": "reranker-config",
+          "label": "RerankerConfig",
+          "kind": "class"
+        },
+        {
+          "id": "base-reranker-config",
+          "label": "BaseRerankerConfig",
+          "kind": "class"
+        },
+        {
+          "id": "rerank-score",
+          "label": "rerank_score",
+          "kind": "concept"
+        },
+        {
+          "id": "rerank-stage",
+          "label": "Reranking stage",
+          "kind": "algorithm"
+        },
+        {
+          "id": "graceful-fallback",
+          "label": "Graceful fallback pattern",
+          "kind": "pattern"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "llms",
+          "config-system"
+        ],
+        "usedBy": [
+          "memory-engine",
+          "memory-algorithm",
+          "client-sdk"
+        ],
+        "related": [
+          "vector-stores",
+          "embeddings",
+          "data-flow",
+          "architecture",
+          "evaluation",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/reranker/base.py",
+          "symbol": "BaseReranker",
+          "note": "Abstract base: single rerank(query, documents, top_k) method; contract that documents carry a 'memory' field and results gain a 'rerank_score'."
+        },
+        {
+          "path": "mem0/reranker/cohere_reranker.py",
+          "symbol": "CohereReranker",
+          "note": "Hosted Cohere rerank API; default rerank-english-v3.0; COHERE_API_KEY; trusts API ordering."
+        },
+        {
+          "path": "mem0/reranker/sentence_transformer_reranker.py",
+          "symbol": "SentenceTransformerReranker",
+          "note": "Local CrossEncoder; default cross-encoder/ms-marco-MiniLM-L-6-v2; raw logits, no normalisation."
+        },
+        {
+          "path": "mem0/reranker/huggingface_reranker.py",
+          "symbol": "HuggingFaceReranker",
+          "note": "Transformers+Torch cross-encoder; default BAAI/bge-reranker-base; batching, device auto-detect, optional min-max normalisation."
+        },
+        {
+          "path": "mem0/reranker/llm_reranker.py",
+          "symbol": "LLMReranker",
+          "note": "LLM-as-judge 0-1 scoring via LlmFactory; system/user prompt split, 4000-char truncation, deprecated scoring_prompt, nested llm config."
+        },
+        {
+          "path": "mem0/reranker/zero_entropy_reranker.py",
+          "symbol": "ZeroEntropyReranker",
+          "note": "Hosted ZeroEntropy rerank API; default zerank-1; ZERO_ENTROPY_API_KEY; re-sorts client-side."
+        },
+        {
+          "path": "mem0/utils/factory.py",
+          "symbol": "RerankerFactory",
+          "note": "provider_to_class registry (5 keys) mapping provider -> (dotted class path, config class); create() lazily imports class."
+        },
+        {
+          "path": "mem0/configs/rerankers/config.py",
+          "symbol": "RerankerConfig",
+          "note": "MemoryConfig.reranker shape: provider (default 'cohere') + config dict; extra=forbid."
+        },
+        {
+          "path": "mem0/configs/rerankers/base.py",
+          "symbol": "BaseRerankerConfig",
+          "note": "Common config fields: provider, model, api_key, top_k; base for all provider configs."
+        },
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory.search / _search_vector_store",
+          "note": "Where rerank is invoked: after _search_vector_store fusion, gated by rerank=True and self.reranker; async path uses asyncio.to_thread."
+        },
+        {
+          "path": "mem0/configs/base.py",
+          "symbol": "MemoryConfig.reranker",
+          "note": "Optional[RerankerConfig] default None — reranking off unless configured."
+        }
+      ],
+      "searchTerms": [
+        "reranker",
+        "rerank",
+        "rerank_score",
+        "BaseReranker",
+        "RerankerFactory",
+        "CohereReranker",
+        "SentenceTransformerReranker",
+        "HuggingFaceReranker",
+        "LLMReranker",
+        "ZeroEntropyReranker",
+        "cross-encoder",
+        "cohere rerank",
+        "zerank-1",
+        "bge-reranker",
+        "ms-marco-MiniLM",
+        "relevance scoring",
+        "second-stage retrieval",
+        "rerank=True",
+        "RerankerConfig",
+        "llm_reranker",
+        "sentence_transformer provider",
+        "reorder search results",
+        "top_k reranking"
+      ]
+    },
+    {
+      "slug": "graph-memory",
+      "title": "Graph Memory (deprecated)",
+      "summary": "Graph Memory was an optional relationship-aware retrieval layer that layered a property graph (Neo4j, Memgraph, Kuzu, Apache AGE, Amazon Neptune) over mem0's vector store, opted into via a graph_store section of MemoryConfig and an enable_graph flag. It has been removed entirely from both the Python and TypeScript OSS packages in the v3 rewrite (commit 59880a6f), with docs cleaned up in #5277. Its function — surfacing memories connected through shared entities — is now handled by native entity linking: a sibling {collection}_entities vector collection plus a retrieval-time entity boost (ENTITY_BOOST_WEIGHT=0.5) fused into the combined score, requiring no external graph database. Users upgrading should drop enable_graph/graph_store config; no data migration is needed, but the old relations field is no longer populated.",
+      "surprises": [
+        {
+          "title": "Graph memory is removed, not just deprecated",
+          "detail": "There is no mem0/graphs/ directory, no graph_memory.py/memgraph_memory.py/kuzu_memory.py, no graph references in mem0/memory/main.py, and no mem0-ts/src/oss/src/graphs/. The enable_graph/graph_store and enableGraph/graphStore config keys are silently ignored, not honored. Finalized in commit 59880a6f.",
+          "category": "deprecation"
+        },
+        {
+          "title": "Cypher sanitization helpers survive as dead code",
+          "detail": "sanitize_relationship_for_cypher() and remove_spaces_from_entities() still live in mem0/memory/utils.py and are tested by tests/memory/test_memory_utils.py with Neo4j/Memgraph/Kuzu/Neptune docstrings, but remove_spaces_from_entities has no non-test caller anywhere in mem0/ — it is vestigial.",
+          "category": "gotcha"
+        },
+        {
+          "title": "'Entity graph' naming is conceptual, not a graph DB",
+          "detail": "The migration guide and mem0/configs/prompts.py still say 'entity graph boost' and 'build a graph of related memories,' but there is no graph database or traversal — it refers to memory-to-memory links in payload fields scored at retrieval time.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Neptune survives as a vector store, not a graph store",
+          "detail": "mem0/vector_stores/neptune_analytics.py remains as a vector index provider, distinct from the removed Neptune graph adapters that lived under mem0/graphs/neptune/. Same vendor, different feature.",
+          "category": "gotcha"
+        },
+        {
+          "title": "The relations field is a silent breaking change",
+          "detail": "search()/get_all() no longer populate the old relations key. Entity relationships are consumed only through retrieval ranking and are not exposed as a queryable graph; apps that traversed triples directly must be redesigned with no drop-in equivalent.",
+          "category": "correctness"
+        },
+        {
+          "title": "Graph memory doubled LLM cost when enabled",
+          "detail": "A configured graph store ran a second LLM extraction pass per add() to mint triples and used a ThreadPoolExecutor fan-out (commit a6130c54 added a skip-when-disabled fast path). V3 entity extraction uses local spaCy NLP with zero LLM calls.",
+          "category": "performance"
+        },
+        {
+          "title": "Entity store reuses the same vector provider",
+          "detail": "Memory.entity_store lazily creates a {collection_name}_entities collection via the same VectorStoreFactory provider; for Qdrant embedded mode it reuses the existing client to avoid RocksDB lock contention. No separate database is configured.",
+          "category": "clever-pattern"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "graph-store-config",
+          "label": "GraphStoreConfig (removed)",
+          "kind": "class"
+        },
+        {
+          "id": "graph-memory",
+          "label": "Graph Memory",
+          "kind": "concept"
+        },
+        {
+          "id": "entity-linking",
+          "label": "Entity Linking",
+          "kind": "algorithm"
+        },
+        {
+          "id": "entity-store",
+          "label": "Memory.entity_store",
+          "kind": "service"
+        },
+        {
+          "id": "entity-boost-weight",
+          "label": "ENTITY_BOOST_WEIGHT",
+          "kind": "concept"
+        },
+        {
+          "id": "sanitize-relationship-for-cypher",
+          "label": "sanitize_relationship_for_cypher",
+          "kind": "concept"
+        },
+        {
+          "id": "neo4j-backend",
+          "label": "Neo4j graph backend (removed)",
+          "kind": "provider"
+        },
+        {
+          "id": "memgraph-backend",
+          "label": "Memgraph graph backend (removed)",
+          "kind": "provider"
+        },
+        {
+          "id": "kuzu-backend",
+          "label": "Kuzu graph backend (removed)",
+          "kind": "provider"
+        },
+        {
+          "id": "apache-age-backend",
+          "label": "Apache AGE graph backend (removed)",
+          "kind": "provider"
+        },
+        {
+          "id": "neptune-graph-backend",
+          "label": "Amazon Neptune graph backend (removed)",
+          "kind": "provider"
+        },
+        {
+          "id": "score-fusion",
+          "label": "Multi-signal score fusion",
+          "kind": "algorithm"
+        },
+        {
+          "id": "relations-field",
+          "label": "relations field (removed)",
+          "kind": "concept"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-algorithm",
+          "vector-stores",
+          "config-system"
+        ],
+        "usedBy": [
+          "architecture",
+          "surprises",
+          "glossary",
+          "memory-algorithm"
+        ],
+        "related": [
+          "memory-engine",
+          "data-flow",
+          "typescript-sdk",
+          "server",
+          "openmemory",
+          "client-sdk",
+          "evaluation"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/memory/main.py",
+          "symbol": "Memory.entity_store / _upsert_entity / _remove_memory_from_entity_store",
+          "note": "Entity linking implementation that replaced graph memory; lazily creates {collection}_entities sibling collection. Contains zero graph references."
+        },
+        {
+          "path": "mem0/utils/scoring.py",
+          "symbol": "ENTITY_BOOST_WEIGHT",
+          "note": "Entity boost (0.5) fused with semantic + BM25 into combined score; the retrieval-time replacement for graph relationship lookup."
+        },
+        {
+          "path": "mem0/utils/entity_extraction.py",
+          "symbol": "extract_entities",
+          "note": "Local spaCy-based entity extraction, no LLM call — replaces the LLM triple-extraction pass graph memory required."
+        },
+        {
+          "path": "mem0/memory/utils.py",
+          "symbol": "sanitize_relationship_for_cypher / remove_spaces_from_entities",
+          "note": "Vestigial Cypher helpers retained with tests but with no non-test caller in mem0/."
+        },
+        {
+          "path": "mem0/exceptions.py",
+          "symbol": "DependencyError",
+          "note": "Docstring still references kuzu/graph_store as an example; no active graph code."
+        },
+        {
+          "path": "mem0/vector_stores/neptune_analytics.py",
+          "symbol": "NeptuneAnalytics",
+          "note": "Surviving Neptune VECTOR store provider, distinct from the removed Neptune graph adapters."
+        },
+        {
+          "path": "docs/migration/oss-v2-to-v3.mdx",
+          "symbol": "Graph Memory → Entity Linking section",
+          "note": "Canonical migration guide; documents removed flags, ~4000 lines removed, and the relations field breaking change."
+        },
+        {
+          "path": "docs/docs.json",
+          "symbol": "redirects",
+          "note": "Old graph-memory doc routes now redirect to /migration/oss-v2-to-v3; graph-memory.mdx feature page deleted."
+        }
+      ],
+      "searchTerms": [
+        "graph memory",
+        "graph store",
+        "enable_graph",
+        "enableGraph",
+        "graph_store",
+        "graphStore",
+        "Neo4j",
+        "Memgraph",
+        "Kuzu",
+        "Apache AGE",
+        "Neptune",
+        "entity linking",
+        "entity store",
+        "relations field",
+        "entity boost",
+        "ENTITY_BOOST_WEIGHT",
+        "Cypher",
+        "sanitize_relationship_for_cypher",
+        "deprecated graph",
+        "v3 graph removal",
+        "relationship retrieval",
+        "property graph",
+        "triples",
+        "oss-v2-to-v3 migration"
+      ]
+    },
+    {
+      "slug": "client-sdk",
+      "title": "Hosted Client &amp; Proxy",
+      "summary": "Documents the hosted-platform clients MemoryClient (sync) and AsyncMemoryClient (async) in mem0/client/main.py — thin httpx wrappers over api.mem0.ai authenticated by MEM0_API_KEY, with org_id/project_id resolved from the key via GET /v1/ping/. Covers every public method (add/search/get/get_all/update/delete/delete_all/history/users/delete_users/reset/batch_update/batch_delete/export/summary/feedback/webhooks), the typed Pydantic option models, the api_error_handler decorator that maps HTTP status codes to structured MemoryError subclasses, telemetry capture, the Project/AsyncProject management API, and the LiteLLM-based chat-completion proxy that retrieves+injects memories and writes new turns on a daemon thread. Contrasts the HTTP client with the in-process self-hosted engine and notes the recent delete_linked and latest_only/latestOnly features on hosted reads.",
+      "surprises": [
+        {
+          "title": "Async client validates its API key with blocking requests in __init__",
+          "detail": "AsyncMemoryClient._validate_api_key() uses the synchronous requests library and is called directly inside __init__, so constructing the async client performs one blocking network round-trip before any await; only later memory operations use the non-blocking httpx.AsyncClient.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Entity-param guard is asymmetric across methods",
+          "detail": "search() and get_all() reject top-level user_id/agent_id/app_id/run_id (ENTITY_PARAMS) and force them into filters={...}, but add() and delete_all() accept the same kwargs at top level — so identity params are valid on writes yet rejected on reads.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Importing the proxy can trigger a live pip install",
+          "detail": "mem0/proxy/main.py runs import litellm at module load and, if missing, shells out to pip install litellm in a subprocess (exiting the process on failure) — a surprising import-time side effect in locked-down environments.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Proxy writes memories fire-and-forget on a daemon thread",
+          "detail": "Completions._async_add_to_memory spawns a daemon thread calling mem0_client.add(...), so a slow/failed write never blocks or breaks the chat response, but failures are silent and a memory written this turn is not guaranteed searchable on the immediate next turn.",
+          "category": "design"
+        },
+        {
+          "title": "org_id/project_id resolved from key, never injected into memory params",
+          "detail": "MemoryClient._prepare_params intentionally omits org_id/project_id (resolved server-side from the API key via /v1/ping/), while only the Project manager injects them into the URL/query for org/project-scoped endpoints.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Endpoint paths straddle v1/v2/v3 API generations",
+          "detail": "Memory add/read/search use /v3/, per-ID ops + history + batch + exports + feedback + entity listing use /v1/, entity deletion uses /v2/entities/, and project/webhook management uses /api/v1/ — and the option-model docstrings still say 'v2 API' for search/get_all despite the code posting to v3.",
+          "category": "gotcha"
+        },
+        {
+          "title": "get_project/update_project deprecated in favor of client.project",
+          "detail": "MemoryClient.get_project()/update_project() log a deprecation warning steering callers to client.project.get()/update() and are slated for removal in package v1.0; the surfaces are not perfectly aligned (memory_depth/usecase_setting exist only on the legacy methods).",
+          "category": "deprecation"
+        },
+        {
+          "title": "delete_linked is the delete-side counterpart of latest_only",
+          "detail": "delete(memory_id, delete_linked=True) transitively removes the older memories a memory superseded (the v3 linked_memory_ids chain) so a superseded memory cannot resurface; the flag is normalized via {'delete_linked': delete_linked or None} so it is omitted when False.",
+          "category": "correctness"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "memory-client",
+          "label": "MemoryClient",
+          "kind": "class"
+        },
+        {
+          "id": "async-memory-client",
+          "label": "AsyncMemoryClient",
+          "kind": "class"
+        },
+        {
+          "id": "api-error-handler",
+          "label": "api_error_handler decorator",
+          "kind": "pattern"
+        },
+        {
+          "id": "memory-error-hierarchy",
+          "label": "MemoryError exception hierarchy",
+          "kind": "class"
+        },
+        {
+          "id": "base-project",
+          "label": "BaseProject / Project / AsyncProject",
+          "kind": "class"
+        },
+        {
+          "id": "project-config",
+          "label": "ProjectConfig",
+          "kind": "class"
+        },
+        {
+          "id": "client-option-models",
+          "label": "Pydantic option models (AddMemoryOptions, SearchMemoryOptions, etc.)",
+          "kind": "module"
+        },
+        {
+          "id": "mem0-proxy",
+          "label": "Mem0 proxy (Completions.create)",
+          "kind": "class"
+        },
+        {
+          "id": "litellm-completion",
+          "label": "litellm.completion wrapper",
+          "kind": "service"
+        },
+        {
+          "id": "capture-client-event",
+          "label": "capture_client_event telemetry",
+          "kind": "service"
+        },
+        {
+          "id": "delete-linked",
+          "label": "delete_linked",
+          "kind": "concept"
+        },
+        {
+          "id": "latest-only",
+          "label": "latest_only / latestOnly",
+          "kind": "concept"
+        },
+        {
+          "id": "ping-validate",
+          "label": "/v1/ping/ API-key validation",
+          "kind": "service"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-algorithm",
+          "rerankers",
+          "config-system"
+        ],
+        "usedBy": [
+          "server",
+          "integrations",
+          "typescript-sdk"
+        ],
+        "related": [
+          "memory-engine",
+          "architecture",
+          "typescript-sdk",
+          "server",
+          "graph-memory",
+          "surprises",
+          "data-flow"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0/client/main.py",
+          "symbol": "MemoryClient",
+          "note": "Sync client: construction, _validate_api_key, all public memory methods, ENTITY_PARAMS guard, _prepare_params/_prepare_payload, deprecated get_project/update_project"
+        },
+        {
+          "path": "mem0/client/main.py",
+          "symbol": "AsyncMemoryClient",
+          "note": "Async mirror of every method; __aenter__/__aexit__; sync requests-based key validation in __init__"
+        },
+        {
+          "path": "mem0/client/project.py",
+          "symbol": "BaseProject / Project / AsyncProject",
+          "note": "Project & member management: get/create/update(decay,multilingual)/delete/get_members/add_member/update_member/remove_member; ProjectConfig"
+        },
+        {
+          "path": "mem0/client/types.py",
+          "symbol": "AddMemoryOptions / SearchMemoryOptions / GetAllMemoryOptions / UpdateMemoryOptions / ProjectUpdateOptions",
+          "note": "Pydantic option models merged with **kwargs"
+        },
+        {
+          "path": "mem0/client/utils.py",
+          "symbol": "api_error_handler",
+          "note": "Decorator mapping httpx errors to structured exceptions; deprecated APIError class"
+        },
+        {
+          "path": "mem0/exceptions.py",
+          "symbol": "create_exception_from_response / HTTP_STATUS_TO_EXCEPTION",
+          "note": "Status-code to MemoryError-subclass mapping"
+        },
+        {
+          "path": "mem0/proxy/main.py",
+          "symbol": "Mem0 / Chat / Completions",
+          "note": "LiteLLM chat-completion proxy: retrieve+inject memories, daemon-thread async add, MEMORY_ANSWER_PROMPT"
+        },
+        {
+          "path": "mem0/memory/telemetry.py",
+          "symbol": "capture_client_event",
+          "note": "Hosted-client telemetry capture attributed to resolved user_email, gated on MEM0_TELEMETRY"
+        }
+      ],
+      "searchTerms": [
+        "MemoryClient",
+        "AsyncMemoryClient",
+        "mem0 hosted client",
+        "MEM0_API_KEY",
+        "api.mem0.ai",
+        "mem0 proxy",
+        "litellm completion",
+        "delete_linked",
+        "latest_only",
+        "latestOnly",
+        "org_id project_id",
+        "client.project",
+        "add_member",
+        "webhooks",
+        "feedback POSITIVE NEGATIVE",
+        "api_error_handler",
+        "MemoryError",
+        "RateLimitError",
+        "Retry-After",
+        "ENTITY_PARAMS filters",
+        "v3 memories add search",
+        "batch_update batch_delete",
+        "memory decay",
+        "multilingual",
+        "create_memory_export",
+        "get_summary",
+        "Mem0-User-ID header",
+        "ping validate api key"
+      ]
+    },
+    {
+      "slug": "server",
+      "title": "Self-Hosted Server",
+      "summary": "The server/ directory is a standalone FastAPI app that wraps the OSS Memory engine in a secure REST API plus a Next.js dashboard. Auth is on by default (Bearer JWT, per-user X-API-Key, or legacy ADMIN_API_KEY), the server refuses to boot without JWT_SECRET unless AUTH_DISABLED=true, and state lives in two Postgres databases on one pgvector instance (memories + a mem0_app auth/audit DB migrated by Alembic). Notable mechanics include single-use rotating refresh tokens, constant-time login, slowapi rate limits on auth routes, off-hot-path request logging with BRIN-indexed pruning, an upstream-error classifier returning clean 502s, and the recent /search 502 fix with rich pgvector filter operators.",
+      "surprises": [
+        {
+          "title": "No Neo4j/APOC in the self-hosted stack",
+          "detail": "Despite common assumptions, server/docker-compose.yaml defines only three services: mem0 (API), postgres (ankane/pgvector:v0.5.1), and mem0-dashboard. There is no Neo4j/APOC container. The graph DB stack only appears via the dev.Dockerfile installing mem0ai[graph]; graph memory is deprecated in OSS core.",
+          "category": "design"
+        },
+        {
+          "title": "At-most-one admin enforced at the DB layer",
+          "detail": "Migration 004_unique_admin_role.py adds a partial unique index on users(role) WHERE role='admin'. Combined with register()'s 'registration is closed once any user exists' guard and its IntegrityError rollback, the first registrant becomes the sole admin and the endpoint locks shut.",
+          "category": "security"
+        },
+        {
+          "title": "Single-use refresh tokens via conditional UPDATE",
+          "detail": "consume_refresh_jti() uses UPDATE refresh_token_jtis SET used_at=now WHERE jti=? AND used_at IS NULL AND expires_at>now, then checks rowcount==0 to 401. This closes the read-check-write race so concurrent token replays race on a single row and at most one wins.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Constant-time login to avoid email enumeration",
+          "detail": "login() calls dummy_verify_password() (pwd_context.dummy_verify) when the email is not found, burning the same bcrypt cycles as a real verify so response timing does not leak whether an account exists.",
+          "category": "security"
+        },
+        {
+          "title": "Request logs are written off the hot path and pruned manually",
+          "detail": "_persist_request_log runs via loop.run_in_executor so DB writes never block responses. The append-only request_logs table (~864k rows/day at 10 req/s) uses a BRIN index on created_at (migration 006) and is pruned only by scripts/prune_request_logs.py / make prune-logs — nothing prunes automatically.",
+          "category": "performance"
+        },
+        {
+          "title": "/search 502 fix folded deprecated top-level identifiers into filters",
+          "detail": "PR #5263 stopped splatting the whole SearchRequest into Memory.search(); top-level user_id/agent_id/run_id (now deprecated) are merged into the filters dict and only top_k/threshold are forwarded, fixing a 502 when identifiers were passed alongside filters.",
+          "category": "correctness"
+        },
+        {
+          "title": "SQL-injection-safe rich pgvector filter operators",
+          "detail": "OPERATOR_SQL_MAP + _build_filter_conditions compile eq/ne/gt/gte/lt/lte/in/nin/contains/icontains plus $or/$not and a '*' key-exists sentinel into parameterised SQL over the JSONB payload. contains/icontains escape backslash/%/underscore and add ESCAPE '\\'; a follow-up (#5264) fixed boolean casing via json.dumps.",
+          "category": "security"
+        },
+        {
+          "title": "Upstream errors are classified by walking the exception chain",
+          "detail": "errors.py _classify walks __cause__/__context__ so wrapped provider errors still map to stable codes (provider_auth_failed, provider_rate_limited, datastore_unavailable, vector_store_unavailable, etc.), returning HTTP 502 with a request_id and no stack trace.",
+          "category": "design"
+        },
+        {
+          "title": "Runtime config persists to DB and layers over .env",
+          "detail": "server_state.py keeps a single process-global Memory instance behind an RLock; POST /configure deep-merges and upserts overrides into the settings table (INSERT ... ON CONFLICT DO UPDATE). On restart, persisted overrides re-apply on top of .env-derived defaults.",
+          "category": "design"
+        },
+        {
+          "title": "Bundled-provider allowlist blocks unknown providers at /configure",
+          "detail": "BUNDLED_LLM_PROVIDERS=(openai,anthropic,gemini) and BUNDLED_EMBEDDER_PROVIDERS=(openai,gemini); _validate_bundled_providers returns 400 if a config selects a provider whose package isn't in the image.",
+          "category": "gotcha"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "fastapi-app-main",
+          "label": "FastAPI app (server/main.py)",
+          "kind": "module"
+        },
+        {
+          "id": "verify-auth",
+          "label": "verify_auth / require_auth",
+          "kind": "pattern"
+        },
+        {
+          "id": "api-key-auth",
+          "label": "Per-user API keys (m0sk_)",
+          "kind": "service"
+        },
+        {
+          "id": "refresh-token-jti",
+          "label": "Single-use refresh tokens",
+          "kind": "pattern"
+        },
+        {
+          "id": "server-state",
+          "label": "server_state runtime config",
+          "kind": "module"
+        },
+        {
+          "id": "upstream-error-classifier",
+          "label": "UpstreamError classifier",
+          "kind": "pattern"
+        },
+        {
+          "id": "request-log-middleware",
+          "label": "Request logging middleware",
+          "kind": "pattern"
+        },
+        {
+          "id": "prune-request-logs",
+          "label": "prune_request_logs script",
+          "kind": "service"
+        },
+        {
+          "id": "pgvector-filter-operators",
+          "label": "pgvector OPERATOR_SQL_MAP filters",
+          "kind": "algorithm"
+        },
+        {
+          "id": "alembic-migrations",
+          "label": "Alembic migrations (mem0_app DB)",
+          "kind": "module"
+        },
+        {
+          "id": "make-bootstrap",
+          "label": "make bootstrap / seed wizard",
+          "kind": "pattern"
+        },
+        {
+          "id": "rate-limiter",
+          "label": "slowapi rate limiter",
+          "kind": "service"
+        },
+        {
+          "id": "db-models",
+          "label": "SQLAlchemy models (users/api_keys/request_logs/settings)",
+          "kind": "class"
+        },
+        {
+          "id": "server-telemetry",
+          "label": "Anonymous PostHog telemetry",
+          "kind": "service"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-engine",
+          "vector-stores",
+          "config-system",
+          "llms",
+          "embeddings",
+          "data-flow",
+          "memory-algorithm"
+        ],
+        "usedBy": [
+          "client-sdk",
+          "integrations"
+        ],
+        "related": [
+          "architecture",
+          "openmemory",
+          "surprises",
+          "graph-memory"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "server/main.py",
+          "symbol": "app / add_memory / search_memories / log_requests",
+          "note": "FastAPI app: memory CRUD + search + configure endpoints, CORS, middleware, router mounting, bundled-provider gate, /search 502 fix"
+        },
+        {
+          "path": "server/auth.py",
+          "symbol": "verify_auth / generate_api_key / consume_refresh_jti",
+          "note": "JWT + X-API-Key + ADMIN_API_KEY auth, bcrypt API keys, single-use refresh, constant-time login"
+        },
+        {
+          "path": "server/routers/auth.py",
+          "symbol": "register / login / refresh",
+          "note": "Auth routes with slowapi limits; first-admin registration lock"
+        },
+        {
+          "path": "server/routers/api_keys.py",
+          "symbol": "create_key / revoke_key",
+          "note": "Per-user API key CRUD; full key returned once, soft-revoke via revoked_at"
+        },
+        {
+          "path": "server/routers/entities.py",
+          "symbol": "list_entities / delete_entity",
+          "note": "Aggregate user/agent/run entities and cascade-delete their memories"
+        },
+        {
+          "path": "server/routers/requests.py",
+          "symbol": "list_requests",
+          "note": "Audit log of API-key/admin-key traffic only"
+        },
+        {
+          "path": "server/models.py",
+          "symbol": "User / APIKey / RequestLog / RefreshTokenJti / Settings",
+          "note": "SQLAlchemy ORM models for the mem0_app database"
+        },
+        {
+          "path": "server/server_state.py",
+          "symbol": "initialize_state / update_config / get_memory_instance",
+          "note": "Process-global Memory instance + DB-persisted config overrides"
+        },
+        {
+          "path": "server/errors.py",
+          "symbol": "UpstreamError / _classify / install_request_id_logging",
+          "note": "Provider/datastore exception classifier producing clean 502s + request-id logging"
+        },
+        {
+          "path": "server/rate_limit.py",
+          "symbol": "limiter",
+          "note": "slowapi Limiter keyed by remote address"
+        },
+        {
+          "path": "server/scripts/prune_request_logs.py",
+          "symbol": "main",
+          "note": "Delete request_logs older than REQUEST_LOG_RETENTION_DAYS"
+        },
+        {
+          "path": "server/docker-compose.yaml",
+          "symbol": "services: mem0 / postgres / mem0-dashboard",
+          "note": "Three-service stack: mem0 API, ankane/pgvector postgres, Next.js dashboard"
+        },
+        {
+          "path": "server/Makefile",
+          "symbol": "bootstrap / seed / prune-logs / reset-admin-password",
+          "note": "Operational targets incl. bootstrap chain and seed wizard"
+        },
+        {
+          "path": "server/alembic/versions/006_request_logs_brin.py",
+          "symbol": "upgrade",
+          "note": "Swaps created_at btree for a BRIN index"
+        },
+        {
+          "path": "mem0/vector_stores/pgvector.py",
+          "symbol": "OPERATOR_SQL_MAP / _build_filter_conditions",
+          "note": "Rich, injection-safe JSONB filter operators backing /search and GET /memories"
+        }
+      ],
+      "searchTerms": [
+        "self-hosted server",
+        "FastAPI REST API mem0",
+        "ADMIN_API_KEY",
+        "AUTH_DISABLED",
+        "JWT_SECRET",
+        "X-API-Key",
+        "make bootstrap",
+        "setup wizard",
+        "pgvector docker-compose",
+        "Alembic migrations mem0_app",
+        "refresh token jti single-use",
+        "slowapi rate limit",
+        "request_logs BRIN prune",
+        "prune_request_logs",
+        "upstream_error 502",
+        "/search 502 fix",
+        "pgvector filter operators",
+        "OPERATOR_SQL_MAP",
+        "verify_auth require_auth",
+        "api-keys router",
+        "entities endpoint",
+        "reset-admin-password",
+        "server_state config overrides",
+        "BUNDLED_LLM_PROVIDERS",
+        "telemetry posthog"
+      ]
+    },
+    {
+      "slug": "typescript-sdk",
+      "title": "TypeScript SDK",
+      "summary": "The mem0ai npm package (mem0-ts/) ships two surfaces: a thin hosted-platform client (import { MemoryClient } from \"mem0ai\") and a self-contained OSS memory engine (import { Memory } from \"mem0ai/oss\"). The OSS side is a faithful port of the Python Memory engine — same config-driven provider factories, same April-2026 single-pass additive extraction algorithm, same entity-linking retrieval — built dual-format (CJS+ESM) with tsup and tested with Jest. Key divergences from Python: no AsyncMemory/AsyncMemoryClient duplicate classes (everything is already promise-based), no LLM proxy wrapper, no graph-memory store and no OSS reranker layer; the TS provider roster is a curated subset (11 LLMs, 6 embedders, 8 vector stores).",
+      "surprises": [
+        {
+          "title": "No AsyncMemory or AsyncMemoryClient in TypeScript",
+          "detail": "Python duplicates every engine/client method into sync and async classes. The TS SDK has exactly one Memory class and one MemoryClient because all methods already return Promises — a structural divergence, not a feature gap.",
+          "category": "design"
+        },
+        {
+          "title": "OSS README is stale and misleading",
+          "detail": "src/oss/README.md still shows import { Memory } from \"mem0-ts\" (wrong package name; real is mem0ai/oss), a legacy positional add(\"text\",\"user123\") signature, and advertises 'Optional graph-based memory relationships' — none of which match the code. The package is named mem0ai and uses an entity store, not a graph DB.",
+          "category": "deprecation"
+        },
+        {
+          "title": "No graph database in the OSS TS engine",
+          "detail": "There is no graphs/ subdir, no Neo4j/Memgraph provider, and no graph factory. Relationship awareness comes from a lazily-created &lt;collection&gt;_entities vector collection plus compromise-based NLP entity extraction. The only 'graph' mentions are a prompt example and a test name.",
+          "category": "design"
+        },
+        {
+          "title": "latestOnly and deleteLinked are wired on the hosted client",
+          "detail": "latestOnly?: boolean (search/getAll) serializes to latest_only via camelToSnakeKeys; deleteLinked?: boolean (delete) is off by default and serializes to the delete_linked query param, cascading deletion of superseded v3 linked-chain memories. Both verified by jest tests.",
+          "category": "correctness"
+        },
+        {
+          "title": "Filter normalization prevents 'undefined' wire footguns",
+          "detail": "search()/getAll() drop entity-id keys that resolve to undefined because Qdrant rejects the malformed match, pgvector binds NULL, and Redis emits a literal 'undefined' string in TAG filters. Top-level entity params throw via rejectTopLevelEntityParams().",
+          "category": "gotcha"
+        },
+        {
+          "title": "Self-healing deferred initialization",
+          "detail": "Vector-store creation is deferred to _autoInitialize() (so embedding dimension can be auto-probed). _ensureInitialized() stores the first failure instead of throwing from the constructor and retries on the next method call, surviving a transiently-down embedder/store at startup.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "All heavy deps are external peer dependencies",
+          "detail": "tsup marks every provider client (OpenAI, Anthropic, pg, redis, qdrant, supabase, azure, cloudflare, langchain, better-sqlite3, compromise, natural) as external; providers import them lazily and a tsup-externals.test.ts guards it, so a minimal install pulls nothing extra.",
+          "category": "performance"
+        },
+        {
+          "title": "compromise NLP is optional with regex fallback",
+          "detail": "Entity extraction dynamically require()s the compromise package and silently falls back to a pure-regex extractor if it isn't installed, so the engine runs without the optional NLP peer deps.",
+          "category": "clever-pattern"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "memory-client-ts",
+          "label": "MemoryClient (hosted)",
+          "kind": "class"
+        },
+        {
+          "id": "oss-memory-ts",
+          "label": "Memory (OSS engine)",
+          "kind": "class"
+        },
+        {
+          "id": "add-to-vector-store-pipeline",
+          "label": "addToVectorStore v3 phased pipeline",
+          "kind": "algorithm"
+        },
+        {
+          "id": "entity-store-ts",
+          "label": "Entity store (graph replacement)",
+          "kind": "pattern"
+        },
+        {
+          "id": "provider-factories-ts",
+          "label": "EmbedderFactory / LLMFactory / VectorStoreFactory / HistoryManagerFactory",
+          "kind": "pattern"
+        },
+        {
+          "id": "memory-error-hierarchy",
+          "label": "MemoryError exception hierarchy",
+          "kind": "class"
+        },
+        {
+          "id": "vector-store-interface-ts",
+          "label": "VectorStore interface",
+          "kind": "interface"
+        },
+        {
+          "id": "llm-interface-ts",
+          "label": "LLM interface",
+          "kind": "interface"
+        },
+        {
+          "id": "embedder-interface-ts",
+          "label": "Embedder interface",
+          "kind": "interface"
+        },
+        {
+          "id": "tsup-dual-build",
+          "label": "tsup CJS+ESM dual build",
+          "kind": "module"
+        },
+        {
+          "id": "camel-snake-translation",
+          "label": "camelToSnakeKeys / snakeToCamelKeys",
+          "kind": "pattern"
+        },
+        {
+          "id": "additive-extraction-prompt-ts",
+          "label": "ADDITIVE_EXTRACTION_PROMPT (ported)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "mem0-community-langchain",
+          "label": "@mem0/community (LangChain)",
+          "kind": "module"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-algorithm",
+          "config-system",
+          "llms",
+          "embeddings",
+          "vector-stores"
+        ],
+        "usedBy": [
+          "architecture",
+          "integrations"
+        ],
+        "related": [
+          "client-sdk",
+          "memory-engine",
+          "graph-memory",
+          "data-flow",
+          "rerankers",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "mem0-ts/package.json",
+          "note": "Package name (mem0ai), exports map for '.' and './oss', scripts, peerDependencies, version injected build"
+        },
+        {
+          "path": "mem0-ts/tsup.config.ts",
+          "note": "Dual entries (client + oss) emitting CJS/ESM/dts; external list; __MEM0_SDK_VERSION__ define"
+        },
+        {
+          "path": "mem0-ts/src/client/mem0.ts",
+          "symbol": "MemoryClient",
+          "note": "Hosted REST client: v3 add/search/getAll, v1 CRUD, webhooks, exports, deleteUsers; rejectTopLevelEntityParams"
+        },
+        {
+          "path": "mem0-ts/src/client/mem0.types.ts",
+          "note": "Request/response types; latestOnly on search/getAll, deleteLinked on delete (serialized latest_only/delete_linked)"
+        },
+        {
+          "path": "mem0-ts/src/oss/src/memory/index.ts",
+          "symbol": "Memory",
+          "note": "OSS engine: deferred init, v3 phased add pipeline, multi-signal search, entity store, advanced filter operators"
+        },
+        {
+          "path": "mem0-ts/src/oss/src/index.ts",
+          "note": "OSS public entry: re-exports Memory, all providers, base interfaces, factories"
+        },
+        {
+          "path": "mem0-ts/src/oss/src/utils/factory.ts",
+          "symbol": "EmbedderFactory/LLMFactory/VectorStoreFactory/HistoryManagerFactory",
+          "note": "Provider dispatch by name — 11 LLMs, 6 embedders, 8 vector stores, 3 history stores, no graph"
+        },
+        {
+          "path": "mem0-ts/src/common/exceptions.ts",
+          "symbol": "createExceptionFromResponse",
+          "note": "Structured MemoryError hierarchy + HTTP-status-to-exception map shared by both surfaces"
+        },
+        {
+          "path": "mem0-ts/src/oss/src/prompts/index.ts",
+          "symbol": "ADDITIVE_EXTRACTION_PROMPT",
+          "note": "Algorithm prompt explicitly ported from mem0/configs/prompts.py; AdditiveExtractionSchema; legacy FactRetrievalSchema vestigial"
+        },
+        {
+          "path": "mem0-ts/src/oss/src/utils/entity_extraction.ts",
+          "symbol": "extractEntities/extractEntitiesBatch",
+          "note": "compromise NLP entity extraction with regex fallback (dynamic require)"
+        },
+        {
+          "path": "mem0-ts/src/oss/src/utils/scoring.ts",
+          "symbol": "scoreAndRank",
+          "note": "Score fusion: semantic + sigmoid-normalized BM25 + ENTITY_BOOST_WEIGHT=0.5 spread-attenuated boost"
+        },
+        {
+          "path": "mem0-ts/jest.config.js",
+          "note": "ts-jest unit config; jest.integration.config.js runs maxWorkers:1 with global setup/teardown"
+        },
+        {
+          "path": "mem0-ts/src/community/package.json",
+          "note": "@mem0/community separate package (v0.0.1) exporting the LangChain integration, external to main bundle"
+        }
+      ],
+      "searchTerms": [
+        "mem0ai npm package",
+        "mem0ai/oss import",
+        "TypeScript MemoryClient",
+        "TypeScript Memory OSS",
+        "tsup CJS ESM build",
+        "jest mem0 tests",
+        "latestOnly latest_only",
+        "deleteLinked delete_linked",
+        "AsyncMemory missing TypeScript",
+        "no graph store TypeScript",
+        "entity store TS",
+        "compromise NLP entity extraction",
+        "VectorStoreFactory LLMFactory",
+        "camelToSnakeKeys",
+        "MemoryError exceptions",
+        "Python vs TypeScript parity",
+        "provider parity mem0",
+        "@mem0/community langchain",
+        "vectorize cloudflare vector store",
+        "better-sqlite3 history"
+      ]
+    },
+    {
+      "slug": "openmemory",
+      "title": "OpenMemory Platform",
+      "summary": "OpenMemory is a self-hosted, single-user memory platform under openmemory/ that wraps the mem0 OSS Memory engine in a FastAPI service, exposes five memory tools over an MCP server (port 8765, SSE + Streamable HTTP transports), and ships a Next.js 15 / React 19 dashboard (port 3000) backed by Redux Toolkit. It keeps a relational SQLite mirror (state, ACLs, audit logs, categories) alongside vectors stored in Qdrant by default (port 6333), with provider auto-detection and a three-revision Alembic chain. It is operationally distinct from server/: no auth, open CORS, one implicit user, intended for local use.",
+      "surprises": [
+        {
+          "title": "create_all and Alembic both own the schema",
+          "detail": "main.py calls Base.metadata.create_all(bind=engine) at import, so fresh installs build the schema from ORM models, while the Alembic chain is a separate, manually-run mechanism (make migrate). A model change not also encoded as a migration appears on new installs but never on upgraded ones.",
+          "category": "correctness"
+        },
+        {
+          "title": "PUT /api/v1/config/ silently discards the update",
+          "detail": "update_configuration() in routers/config.py builds updated_config but never calls save_config_to_db() and returns None implicitly. The working paths are PATCH / and the granular /mem0/llm, /mem0/embedder, /mem0/vector_store, /openmemory setters (which the dashboard uses).",
+          "category": "gotcha"
+        },
+        {
+          "title": "MCP search bypasses the engine retrieval pipeline",
+          "detail": "search_memory does not call memory_client.search(); it manually embeds the query and calls vector_store.search() with limit=10, sidestepping reranking/score-fusion/entity-linking. MCP search returns raw vector hits, not the engine's fused ranking.",
+          "category": "design"
+        },
+        {
+          "title": "Auto-categorization is hard-wired to OpenAI",
+          "detail": "categorization.py instantiates a bare OpenAI() client and always calls gpt-4o-mini regardless of the configured LLM provider, so categorization needs OPENAI_API_KEY even on Ollama/Anthropic setups. It runs inside SQLAlchemy after_insert/after_update event listeners via a separate Session.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Migration Create Date is misleading",
+          "detail": "add_config_table carries Create Date 2023-06-01 yet its down_revision is the 2025 initial migration. The chain order is defined solely by down_revision, never the docstring timestamp; editing an applied migration desyncs alembic_version across databases.",
+          "category": "gotcha"
+        },
+        {
+          "title": "No auth, open CORS, spoofable MCP identity",
+          "detail": "allow_origins=['*'], no API keys, a single implicit user, and MCP identity carried only in the URL path (/mcp/{client_name}/.../{user_id}). Acceptable for a localhost single-user tool, unsafe for shared/networked hosting — use server/ for that.",
+          "category": "security"
+        },
+        {
+          "title": "Resilient lazy memory-client init",
+          "detail": "get_memory_client_safe() returns None on failure and every MCP tool degrades to a 'Memory system unavailable' string instead of crashing, keeping the MCP server alive when the LLM/embedder (e.g. Ollama) is down.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "UI env vars are sed-replaced into a prebuilt bundle",
+          "detail": "ui/Dockerfile builds Next.js with placeholder NEXT_PUBLIC_* strings; entrypoint.sh sed-replaces them in .next/ at container start, so one prebuilt image is re-pointed at a new API URL/user without rebuilding — but requires a restart, not a reload.",
+          "category": "clever-pattern"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "mcp-server",
+          "label": "OpenMemory MCP server (FastMCP)",
+          "kind": "service"
+        },
+        {
+          "id": "add-memories-tool",
+          "label": "add_memories / search_memory / list_memories / delete_memories / delete_all_memories tools",
+          "kind": "interface"
+        },
+        {
+          "id": "get-memory-client",
+          "label": "get_memory_client (config assembly + caching)",
+          "kind": "module"
+        },
+        {
+          "id": "memory-model",
+          "label": "Memory / App / User SQLAlchemy models",
+          "kind": "class"
+        },
+        {
+          "id": "memory-state",
+          "label": "MemoryState enum (active/paused/archived/deleted)",
+          "kind": "concept"
+        },
+        {
+          "id": "check-memory-access-permissions",
+          "label": "check_memory_access_permissions (ACL)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "alembic-chain",
+          "label": "Alembic migration chain (3 revisions)",
+          "kind": "pattern"
+        },
+        {
+          "id": "categorization",
+          "label": "OpenAI auto-categorization event hooks",
+          "kind": "algorithm"
+        },
+        {
+          "id": "vector-store-autodetect",
+          "label": "Vector store auto-detection (get_default_memory_config)",
+          "kind": "pattern"
+        },
+        {
+          "id": "config-router",
+          "label": "Config router + configs table",
+          "kind": "module"
+        },
+        {
+          "id": "backup-router",
+          "label": "Backup export/import (provider-agnostic)",
+          "kind": "module"
+        },
+        {
+          "id": "nextjs-dashboard",
+          "label": "Next.js 15 dashboard + Redux Toolkit store",
+          "kind": "module"
+        },
+        {
+          "id": "streamable-http-transport",
+          "label": "Streamable HTTP / SSE MCP transports",
+          "kind": "interface"
+        },
+        {
+          "id": "qdrant-store",
+          "label": "Qdrant default vector store (mem0_store)",
+          "kind": "provider"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-engine",
+          "vector-stores",
+          "config-system",
+          "llms",
+          "embeddings",
+          "memory-algorithm"
+        ],
+        "usedBy": [
+          "integrations"
+        ],
+        "related": [
+          "server",
+          "architecture",
+          "client-sdk",
+          "data-flow",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "openmemory/api/main.py",
+          "symbol": "app / create_default_user / create_default_app",
+          "note": "FastAPI app bootstrap: create_all at import, seed user/app, mount MCP router + 5 REST routers, add_pagination"
+        },
+        {
+          "path": "openmemory/api/app/mcp_server.py",
+          "symbol": "FastMCP, @mcp.tool, setup_mcp_server, handle_sse, handle_streamable_http",
+          "note": "MCP server: 5 memory tools, contextvar identity, SSE + stateless Streamable HTTP transports, lazy client"
+        },
+        {
+          "path": "openmemory/api/app/models.py",
+          "symbol": "User/App/Memory/Category/AccessControl/MemoryStatusHistory/MemoryAccessLog/Config + categorize_memory event hooks",
+          "note": "SQLite relational mirror schema; after_insert/after_update categorization listeners"
+        },
+        {
+          "path": "openmemory/api/app/utils/memory.py",
+          "symbol": "get_memory_client / get_default_memory_config / _fix_ollama_urls / provider factories",
+          "note": "Config assembly, vector-store/LLM/embedder auto-detection, MD5 cache, Docker->host Ollama URL rewrite"
+        },
+        {
+          "path": "openmemory/api/app/routers/memories.py",
+          "symbol": "list/filter/create/delete/pause/archive/related + get_accessible_memory_ids",
+          "note": "Primary REST surface and ACL resolution"
+        },
+        {
+          "path": "openmemory/api/app/routers/config.py",
+          "symbol": "update_configuration (PUT no-op), patch_configuration, granular setters",
+          "note": "Config CRUD; PUT / never saves, PATCH and granular setters do"
+        },
+        {
+          "path": "openmemory/api/app/routers/backup.py",
+          "symbol": "export_backup / import_backup",
+          "note": "Provider-agnostic zip export (relational + jsonl.gz) and re-embedding import"
+        },
+        {
+          "path": "openmemory/api/app/utils/permissions.py",
+          "symbol": "check_memory_access_permissions",
+          "note": "Central read-access ACL check (state + app active + allow/deny rules)"
+        },
+        {
+          "path": "openmemory/api/app/utils/categorization.py",
+          "symbol": "get_categories_for_memory / MemoryCategories",
+          "note": "OpenAI gpt-4o-mini structured categorization with tenacity retry"
+        },
+        {
+          "path": "openmemory/api/alembic/versions/",
+          "symbol": "0b53c747049a -> add_config_table -> afd00efbd06b",
+          "note": "Linear migration chain; ordered by down_revision, not Create Date"
+        },
+        {
+          "path": "openmemory/docker-compose.yml",
+          "symbol": "mem0_store / openmemory-mcp / openmemory-ui",
+          "note": "3-service stack: Qdrant 6333, API/MCP 8765, UI 3000"
+        },
+        {
+          "path": "openmemory/ui/store/store.ts",
+          "symbol": "configureStore (6 slices)",
+          "note": "Redux Toolkit store for the Next.js 15 dashboard"
+        },
+        {
+          "path": "openmemory/ui/entrypoint.sh",
+          "symbol": "NEXT_PUBLIC_ sed substitution",
+          "note": "Runtime env-var injection into prebuilt .next bundle"
+        }
+      ],
+      "searchTerms": [
+        "openmemory",
+        "mcp server",
+        "model context protocol",
+        "FastMCP",
+        "add_memories",
+        "search_memory",
+        "port 8765",
+        "qdrant 6333",
+        "next.js dashboard",
+        "redux toolkit",
+        "alembic migration chain",
+        "sqlite mirror",
+        "MemoryState",
+        "access control list",
+        "memory access log",
+        "auto categorization",
+        "gpt-4o-mini categories",
+        "vector store auto-detection",
+        "ollama docker host",
+        "streamable http transport",
+        "SSE transport",
+        "backup export import",
+        "config table",
+        "self-hosted memory platform",
+        "openmemory.db",
+        "docker compose openmemory",
+        "run.sh installer"
+      ]
+    },
+    {
+      "slug": "integrations",
+      "title": "Integrations &amp; Ecosystem",
+      "summary": "Surveys mem0's first-party clients and editor plugins: the Python (mem0-cli) and Node (@mem0/cli) CLIs with their Agent Mode <5s key bootstrap and AGENTRUSH game; the mem0-plugin that wires Claude Code/Cursor/Codex/OpenCode/Antigravity to the remote MCP server (mcp.mem0.ai) with lifecycle hooks for automatic capture and nine MCP tools; the @mem0/openclaw-mem0 plugin with token-budgeted recall, pre-extraction filtering, per-agent isolation, and the cost-gated dream consolidation; the @mem0/vercel-ai-provider for AI SDK v5; and the reference vs pipeline skills. Each integration's package, install, and connection path (REST, MCP, or embedded mem0ai SDK) is documented against the source.",
+      "surprises": [
+        {
+          "title": "The CLI [oss] extra is declared but unwired",
+          "detail": "cli/python/pyproject.toml declares oss = [\"mem0ai>=0.1.0\"] and the README/help advertise --graph flags, but backend/base.py get_backend() unconditionally returns PlatformBackend — there is no OssBackend in the backend package, and --graph/--no-graph appear only in the static _build_help_json() dict, not on the live add/search commands.",
+          "category": "gotcha"
+        },
+        {
+          "title": "--agent is overloaded with two meanings",
+          "detail": "As a global flag --agent toggles JSON-envelope output; but mem0 init --agent is a subcommand flag that bootstraps an Agent Mode account. main() special-cases this in argv: when init is present it leaves --agent in place and only strips --json as the output toggle.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Env-var detection triggers Agent Mode but never names the agent",
+          "detail": "agent_detect.detect_agent_caller() recognises CLAUDECODE/CURSOR_AGENT/CODEX_CLI etc. only as a context trigger to enable auto-bootstrap; the canonical agent_caller identity is self-declared via --agent-caller or mem0 identify and is never sniffed from env vars (Proof-Editor style honesty).",
+          "category": "design"
+        },
+        {
+          "title": "OTP claim upgrades the agent key in place",
+          "detail": "claim_via_otp() reuses the email-code flow but adds agent_mode_api_key to the verify body; the backend upgrades the key in place so the API key value never changes, memories transfer, and agent_mode flips false without disrupting a running agent.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Dream-gate orders checks cheapest-first to avoid API calls",
+          "detail": "openclaw dream-gate.ts runs two local file-read gates (>=24h since last run AND >=5 sessions) before the one network round-trip for the >=20 memory-count gate, and uses an exclusive wx lock file (reclaimed after 1h) so racing processes can't double-run consolidation.",
+          "category": "performance"
+        },
+        {
+          "title": "Plugin hooks are engineered to never block the editor",
+          "detail": "Every mem0-plugin hook command ends with 2>/dev/null || true, scripts exit 0 with 3-8s timeouts, and auto_capture.py reads only the transcript tail (200 lines/8000 chars) posting with infer=True so extraction is async — a slow capture can never stall the session.",
+          "category": "performance"
+        },
+        {
+          "title": "AGENTRUSH memories are public",
+          "detail": "mem0 agent-rush add memories are visible to any other player; the CLI gates the first interactive add on an explicit y confirmation (persisted as agent_rush.acknowledged_at) and for non-TTY agent runs prints the PII warning to stderr and proceeds since agents can't answer y/N.",
+          "category": "security"
+        },
+        {
+          "title": "plugin_sync only edits existing entries, never creates them",
+          "detail": "sync_api_key() propagates a new key into ~/.claude/settings.json env and existing export MEM0_API_KEY shell lines via atomic tmp+rename writes, but deliberately never creates new entries or touches Codex/Cursor MCP configs — solving the stale-env-key surprise without clobbering unrelated config.",
+          "category": "clever-pattern"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "mem0-cli-python",
+          "label": "mem0-cli (Python Typer app)",
+          "kind": "service"
+        },
+        {
+          "id": "mem0-cli-node",
+          "label": "@mem0/cli (Node Commander app)",
+          "kind": "service"
+        },
+        {
+          "id": "agent-mode-bootstrap",
+          "label": "Agent Mode bootstrap (init --agent)",
+          "kind": "pattern"
+        },
+        {
+          "id": "platform-backend",
+          "label": "PlatformBackend",
+          "kind": "class"
+        },
+        {
+          "id": "mem0-plugin",
+          "label": "mem0-plugin (MCP + hooks)",
+          "kind": "service"
+        },
+        {
+          "id": "mcp-tools",
+          "label": "MCP memory tools",
+          "kind": "interface"
+        },
+        {
+          "id": "lifecycle-hooks",
+          "label": "Lifecycle hooks (auto-capture)",
+          "kind": "pattern"
+        },
+        {
+          "id": "openclaw-mem0",
+          "label": "@mem0/openclaw-mem0 plugin",
+          "kind": "service"
+        },
+        {
+          "id": "recall-engine",
+          "label": "Token-budgeted recall",
+          "kind": "algorithm"
+        },
+        {
+          "id": "filtering-pipeline",
+          "label": "Pre-extraction filtering",
+          "kind": "algorithm"
+        },
+        {
+          "id": "per-agent-isolation",
+          "label": "Per-agent isolation (session-key routing)",
+          "kind": "pattern"
+        },
+        {
+          "id": "dream-gate",
+          "label": "Dream-gate consolidation",
+          "kind": "algorithm"
+        },
+        {
+          "id": "vercel-ai-provider",
+          "label": "@mem0/vercel-ai-provider",
+          "kind": "provider"
+        },
+        {
+          "id": "reference-skills",
+          "label": "Reference vs pipeline skills",
+          "kind": "concept"
+        },
+        {
+          "id": "plugin-sync",
+          "label": "plugin_sync API key propagation",
+          "kind": "module"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "client-sdk",
+          "memory-engine",
+          "config-system",
+          "memory-algorithm",
+          "typescript-sdk",
+          "vector-stores"
+        ],
+        "usedBy": [
+          "architecture",
+          "surprises",
+          "glossary"
+        ],
+        "related": [
+          "openmemory",
+          "server",
+          "data-flow"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "cli/python/src/mem0_cli/app.py",
+          "symbol": "app, main",
+          "note": "Typer entrypoint; command panels, --agent/--json global-flag handling, scope resolution"
+        },
+        {
+          "path": "cli/python/src/mem0_cli/commands/init_cmd.py",
+          "symbol": "run_init",
+          "note": "Agent Mode dispatch rules (reuse env/config key, else mint shadow), email login, OTP claim trigger"
+        },
+        {
+          "path": "cli/python/src/mem0_cli/commands/agent_mode_cmd.py",
+          "symbol": "bootstrap_via_backend, claim_via_otp",
+          "note": "POST /api/v1/auth/agent_mode/ bootstrap and in-place OTP claim upgrade"
+        },
+        {
+          "path": "cli/python/src/mem0_cli/agent_detect.py",
+          "symbol": "detect_agent_caller",
+          "note": "Env-var agent context trigger list; identity is self-declared not sniffed"
+        },
+        {
+          "path": "cli/python/src/mem0_cli/plugin_sync.py",
+          "symbol": "sync_api_key",
+          "note": "Atomic propagation of API key into existing Claude settings + shell rc entries"
+        },
+        {
+          "path": "cli/python/src/mem0_cli/backend/base.py",
+          "symbol": "Backend, get_backend",
+          "note": "Backend ABC; factory returns PlatformBackend only — no OSS backend wired"
+        },
+        {
+          "path": "cli/python/pyproject.toml",
+          "symbol": "[oss] extra",
+          "note": "Declares oss=[mem0ai] extra that is not consumed by the backend factory"
+        },
+        {
+          "path": "cli/node/src/index.ts",
+          "symbol": "program, getBackendAndConfig",
+          "note": "Commander-based Node CLI with feature parity and 5s ping validation"
+        },
+        {
+          "path": "mem0-plugin/hooks.json",
+          "symbol": "hooks",
+          "note": "SessionStart/UserPromptSubmit/PreToolUse/PostToolUse hook registration"
+        },
+        {
+          "path": "mem0-plugin/.mcp.json",
+          "symbol": "mcpServers.mem0",
+          "note": "Remote MCP server config interpolating ${MEM0_API_KEY} at session start"
+        },
+        {
+          "path": "mem0-plugin/scripts/auto_capture.py",
+          "symbol": "extract_recent_exchanges",
+          "note": "Background transcript-tail capture posted with infer=True; never blocks"
+        },
+        {
+          "path": "openclaw/recall.ts",
+          "symbol": "recall",
+          "note": "Search → category-rank → token-budget → format recall pipeline"
+        },
+        {
+          "path": "openclaw/filtering.ts",
+          "symbol": "filterMessagesForExtraction",
+          "note": "Noise/session-specific pattern dropping, content stripping, truncation, dedup"
+        },
+        {
+          "path": "openclaw/isolation.ts",
+          "symbol": "effectiveUserId, resolveUserId, isNonInteractiveTrigger",
+          "note": "Per-agent namespace routing from session keys; skip cron/subagent sessions"
+        },
+        {
+          "path": "openclaw/dream-gate.ts",
+          "symbol": "checkCheapGates, checkMemoryGate, acquireDreamLock",
+          "note": "Cost-ordered gates + exclusive lock for auto-consolidation"
+        },
+        {
+          "path": "openclaw/index.ts",
+          "symbol": "memoryPlugin, registerAllTools",
+          "note": "definePluginEntry plugin; registers eight memory_* agent tools"
+        },
+        {
+          "path": "vercel-ai-sdk/src/mem0-provider.ts",
+          "symbol": "createMem0, Mem0Provider",
+          "note": "ProviderV2 wrapper exposing mem0(modelId, settings)"
+        },
+        {
+          "path": "vercel-ai-sdk/src/mem0-utils.ts",
+          "symbol": "addMemories, retrieveMemories, getMemories, searchMemories",
+          "note": "Standalone memory helpers; v2/memories/search/ REST calls"
+        },
+        {
+          "path": "vercel-ai-sdk/src/mem0-provider-selector.ts",
+          "symbol": "Mem0ClassSelector.supportedProviders",
+          "note": "openai/anthropic/cohere/groq/google dispatch over @ai-sdk/*"
+        },
+        {
+          "path": "skills/README.md",
+          "symbol": "reference vs pipeline",
+          "note": "Skill taxonomy: always-on reference skills vs on-demand pipeline skills"
+        }
+      ],
+      "searchTerms": [
+        "mem0 cli",
+        "mem0-cli",
+        "@mem0/cli",
+        "mem0 init --agent",
+        "agent mode",
+        "agent-rush",
+        "mem0 whoami",
+        "mem0 identify",
+        "mem0-plugin",
+        "MCP server",
+        "mcp.mem0.ai",
+        "add_memory",
+        "search_memories",
+        "lifecycle hooks",
+        "auto-capture",
+        "openclaw",
+        "@mem0/openclaw-mem0",
+        "recall",
+        "dream-gate",
+        "memory consolidation",
+        "per-agent isolation",
+        "filtering",
+        "vercel ai sdk",
+        "@mem0/vercel-ai-provider",
+        "createMem0",
+        "retrieveMemories",
+        "addMemories",
+        "skills",
+        "mem0-integrate",
+        "mem0-test-integration",
+        "claude code plugin",
+        "cursor",
+        "codex",
+        "plugin_sync",
+        "coding categories",
+        "PlatformBackend"
+      ]
+    },
+    {
+      "slug": "evaluation",
+      "title": "Evaluation &amp; Benchmarks",
+      "summary": "mem0's benchmarking harness under evaluation/ has two phases: a per-technique experiment runner (run_experiments.py) that drives the hosted mem0 platform plus RAG, full-context, LangMem, Zep, and OpenAI baselines against the LoCoMo dataset, and a scorer (evals.py + generate_scores.py) applying BLEU, token-F1, and a GPT-4o-mini LLM-as-judge. The headline April-2026 results (LoCoMo 91.6, LongMemEval 94.8, BEAM 64.1/48.6 at ~7K tokens and ~1s p50) come from a separate open-sourced framework (mem0ai/memory-benchmarks) and reflect single-pass retrieval with no agentic loops. The in-repo harness only covers LoCoMo; LongMemEval and BEAM runners are not vendored here.",
+      "surprises": [
+        {
+          "title": "In-repo harness only covers LoCoMo",
+          "detail": "run_experiments.py hard-codes dataset/locomo10.json / locomo10_rag.json for every technique. The headline LongMemEval (94.8) and BEAM (64.1/48.6) numbers come from the external github.com/mem0ai/memory-benchmarks repo, not this evaluation/ tree.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Category 5 is silently dropped from scoring",
+          "detail": "Both evals.py and metrics/llm_judge.py explicitly `continue` when category == 5 (LoCoMo's adversarial/unanswerable class), so reported accuracy excludes those questions even though the runner still records adversarial_answer fields.",
+          "category": "correctness"
+        },
+        {
+          "title": "store_true flags ignore their argument",
+          "detail": "--filter_memories and --is_graph are argparse store_true flags. Passing `--filter_memories False` still evaluates to True; the README's 'False' default is the absence-of-flag default, not a passable value.",
+          "category": "gotcha"
+        },
+        {
+          "title": "LLM judge is the real headline metric, BLEU/F1 are secondary",
+          "detail": "LoCoMo gold answers are terse and generated answers are verbose, so surface-overlap metrics under-report. The generous GPT-4o-mini judge (CORRECT->1) at temperature 0 is what the 91.6/94.8 numbers actually measure.",
+          "category": "design"
+        },
+        {
+          "title": "chunk_size == -1 is the full-context sentinel",
+          "detail": "RAGManager.create_chunks short-circuits on chunk_size=-1 to return the whole transcript as one chunk with no embeddings and zero search time, reusing the RAG code path to implement the full-context baseline.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "LangMem error path raises UnboundLocalError",
+          "detail": "LangMem.search_memory's except block returns `t2 - t1` but t2 is only assigned in the try block before the failing call, so the error handler itself crashes.",
+          "category": "correctness"
+        },
+        {
+          "title": "Role-swapped ingestion per speaker",
+          "detail": "MemoryADD adds the same conversation twice with user/assistant roles swapped (messages vs messages_reverse) so each of the two speakers gets a first-person memory store; the answer prompt explicitly warns the LLM not to confuse character names with memory owners.",
+          "category": "clever-pattern"
+        },
+        {
+          "title": "Heavy import side effects in metrics/utils.py",
+          "detail": "Importing the metrics module downloads NLTK punkt/wordnet and eagerly loads the all-MiniLM-L6-v2 SentenceTransformer at import time, even though the standard scorer only uses BLEU-1 and token-F1.",
+          "category": "performance"
+        },
+        {
+          "title": "OpenAI baseline reads pre-dumped files, no live API",
+          "detail": "OpenAIPredict reads memories/{idx}.txt exported out-of-band from ChatGPT's memory feature and returns a hard-coded search time of 0; there is no live OpenAI memory API call in the code path.",
+          "category": "gotcha"
+        },
+        {
+          "title": "Zep ingestion gated to first conversation",
+          "detail": "ZepAdd.process_all_conversations only ingests when idx == 0, processing a single LoCoMo conversation (likely to control Zep API cost).",
+          "category": "gotcha"
+        }
+      ],
+      "concepts": [
+        {
+          "id": "experiment-runner",
+          "label": "run_experiments.py (Experiment runner)",
+          "kind": "module"
+        },
+        {
+          "id": "memory-add",
+          "label": "MemoryADD",
+          "kind": "class"
+        },
+        {
+          "id": "memory-search",
+          "label": "MemorySearch",
+          "kind": "class"
+        },
+        {
+          "id": "rag-manager",
+          "label": "RAGManager",
+          "kind": "class"
+        },
+        {
+          "id": "langmem-manager",
+          "label": "LangMemManager",
+          "kind": "class"
+        },
+        {
+          "id": "openai-predict",
+          "label": "OpenAIPredict",
+          "kind": "class"
+        },
+        {
+          "id": "llm-judge",
+          "label": "evaluate_llm_judge (LLM-as-judge)",
+          "kind": "algorithm"
+        },
+        {
+          "id": "evals",
+          "label": "evals.py (scorer)",
+          "kind": "module"
+        },
+        {
+          "id": "generate-scores",
+          "label": "generate_scores.py",
+          "kind": "module"
+        },
+        {
+          "id": "answer-prompts",
+          "label": "ANSWER_PROMPT / ANSWER_PROMPT_GRAPH / ANSWER_PROMPT_ZEP",
+          "kind": "pattern"
+        },
+        {
+          "id": "locomo",
+          "label": "LoCoMo benchmark",
+          "kind": "concept"
+        },
+        {
+          "id": "beam",
+          "label": "BEAM benchmark (1M/10M)",
+          "kind": "concept"
+        },
+        {
+          "id": "longmemeval",
+          "label": "LongMemEval benchmark",
+          "kind": "concept"
+        },
+        {
+          "id": "memory-benchmarks-repo",
+          "label": "mem0ai/memory-benchmarks",
+          "kind": "service"
+        },
+        {
+          "id": "single-pass-eval",
+          "label": "Single-pass retrieval (no agentic loops)",
+          "kind": "concept"
+        }
+      ],
+      "crossLinks": {
+        "uses": [
+          "memory-algorithm",
+          "client-sdk",
+          "data-flow",
+          "graph-memory"
+        ],
+        "usedBy": [
+          "architecture",
+          "surprises",
+          "glossary"
+        ],
+        "related": [
+          "memory-engine",
+          "architecture",
+          "surprises"
+        ]
+      },
+      "codeRefs": [
+        {
+          "path": "evaluation/run_experiments.py",
+          "symbol": "main",
+          "note": "CLI entrypoint; if/elif dispatch to per-technique managers, hard-codes locomo10 dataset paths and output filenames"
+        },
+        {
+          "path": "evaluation/src/memzero/add.py",
+          "symbol": "MemoryADD",
+          "note": "Hosted mem0 ingestion via MemoryClient; role-swapped per-speaker, threaded, custom_instructions, delete_all-first"
+        },
+        {
+          "path": "evaluation/src/memzero/search.py",
+          "symbol": "MemorySearch",
+          "note": "Hosted mem0 retrieval; top_k, filter_memories, is_graph -> output_format v1.1 with relations; renders ANSWER_PROMPT(_GRAPH)"
+        },
+        {
+          "path": "evaluation/src/rag.py",
+          "symbol": "RAGManager",
+          "note": "From-scratch RAG: tiktoken chunking + manual cosine search; chunk_size=-1 is the full-context sentinel"
+        },
+        {
+          "path": "evaluation/src/langmem.py",
+          "symbol": "LangMemManager",
+          "note": "LangGraph ReAct agent per speaker (the one agentic baseline); InMemoryStore + MemorySaver; multiprocessing pool; t2 UnboundLocalError in error path"
+        },
+        {
+          "path": "evaluation/src/openai/predict.py",
+          "symbol": "OpenAIPredict",
+          "note": "Predict-only baseline reading pre-dumped memories/{idx}.txt; search time hard-coded 0"
+        },
+        {
+          "path": "evaluation/metrics/llm_judge.py",
+          "symbol": "evaluate_llm_judge",
+          "note": "GPT-4o-mini judge, temperature 0, json_object format, generous grading, CORRECT->1; uses mem0.memory.utils.extract_json; skips category 5"
+        },
+        {
+          "path": "evaluation/metrics/utils.py",
+          "symbol": "calculate_metrics",
+          "note": "token-F1 + BLEU-1..4; adapted from A-Mem; eager NLTK/SentenceTransformer import side effects"
+        },
+        {
+          "path": "evaluation/evals.py",
+          "symbol": "process_item",
+          "note": "ThreadPoolExecutor scorer producing bleu/f1/llm per item -> evaluation_metrics.json; skips category 5"
+        },
+        {
+          "path": "evaluation/generate_scores.py",
+          "symbol": "(module)",
+          "note": "pandas groupby category -> per-category and overall bleu/f1/llm means"
+        },
+        {
+          "path": "evaluation/prompts.py",
+          "symbol": "ANSWER_PROMPT",
+          "note": "Shared answer-shaping prompts (graph/zep variants); <5-6 word answers, temporal-reasoning rules, name-vs-owner guard"
+        },
+        {
+          "path": "evaluation/Makefile",
+          "symbol": "(targets)",
+          "note": "Named wrappers: run-mem0-add/search, run-mem0-plus-*, run-rag, run-full-context, run-langmem, run-zep-*, run-openai"
+        },
+        {
+          "path": "README.md",
+          "symbol": "New Memory Algorithm (April 2026)",
+          "note": "Headline benchmark table (LoCoMo 91.6 / LongMemEval 94.8 / BEAM 64.1/48.6, ~7K tokens, ~1s p50); single-pass note; links memory-benchmarks repo"
+        }
+      ],
+      "searchTerms": [
+        "LoCoMo",
+        "LongMemEval",
+        "BEAM benchmark",
+        "LLM as judge",
+        "mem0 evaluation",
+        "benchmark results",
+        "91.6",
+        "94.8",
+        "64.1",
+        "run_experiments",
+        "RAG baseline",
+        "full-context baseline",
+        "LangMem",
+        "Zep baseline",
+        "OpenAI memory baseline",
+        "MemoryADD",
+        "MemorySearch",
+        "RAGManager",
+        "evals.py",
+        "generate_scores",
+        "llm_judge",
+        "BLEU F1",
+        "token consumption latency",
+        "single-pass retrieval",
+        "memory-benchmarks",
+        "category 5",
+        "gpt-4o-mini judge",
+        "Mem0+ graph",
+        "reproduce benchmarks"
+      ]
+    }
+  ],
+  "surprises": {
+    "summary": "Authored wiki/_src/bodies/surprises.html, the cross-cutting \"Surprises & Gotchas\" page. Deduplicated and merged the 134 candidate findings into 6 themed sections (Clever Patterns, Performance, Correctness & Gotchas, Security, Deprecations & Migrations, Design Decisions) with ~45 high-signal items, each carrying a bold title and an inline cross-link. Verified the most important claims against the real source before writing: recounted providers in mem0/utils/factory.py (18 LLMs, 24 vector stores, 11 embeddings, 5 rerankers, 0 graph stores — AGENTS.md counts are stale); confirmed no graph refs in mem0/memory/main.py and no graph_store on MemoryConfig; verified score_and_rank in mem0/utils/scoring.py (threshold-before-fusion, adaptive 1.0/1.5/2.0/2.5 divisor); verified entity-boost attenuation 1/(1+0.001(n-1)^2) and the >=0.5 vs >=0.95 thresholds; keyword_search None sentinel; server auth patterns (consume_refresh_jti conditional UPDATE, dummy_verify_password, 004_unique_admin_role.py); ollama/litellm pip-install-at-import; OpenAI embed_batch re-sort by .index; AsyncMemoryClient blocking requests in __init__; LLMBase._is_reasoning_model excluding gpt-5-mini; Azure assistant->ai replace; OpenMemory categorization hard-wired to gpt-4o-mini and MCP search calling vector_store.search() directly. The page opens with an executive lead plus a decision callout framing the single biggest theme (ADD-only single-LLM-call engine, no graph DB). Used dl/ul, callouts (insight/gotcha/decision/perf/security), and three details deep-dives; cross-linked ~40 times across all registry slugs.",
+    "concepts": [
+      {
+        "id": "add-only-extraction",
+        "label": "ADD-only single-LLM-call extraction",
+        "kind": "pattern"
+      },
+      {
+        "id": "lazy-dotted-factory",
+        "label": "Lazy dotted-string provider factories",
+        "kind": "pattern"
+      },
+      {
+        "id": "threshold-before-fusion",
+        "label": "Threshold gates semantic score before fusion",
+        "kind": "gotcha"
+      },
+      {
+        "id": "entity-boost-attenuation",
+        "label": "Spread-attenuated entity boost (hub damping)",
+        "kind": "pattern"
+      },
+      {
+        "id": "graph-memory-removed",
+        "label": "Graph memory removed from OSS core",
+        "kind": "deprecation"
+      },
+      {
+        "id": "keyword-search-none-sentinel",
+        "label": "keyword_search None-as-not-supported sentinel",
+        "kind": "gotcha"
+      },
+      {
+        "id": "entity-param-asymmetry",
+        "label": "Top-level identifier asymmetry (add vs search/get_all)",
+        "kind": "gotcha"
+      },
+      {
+        "id": "import-time-pip-install",
+        "label": "Import-time pip install (ollama, litellm)",
+        "kind": "security"
+      },
+      {
+        "id": "single-use-refresh-token",
+        "label": "Single-use refresh token via conditional UPDATE",
+        "kind": "pattern"
+      },
+      {
+        "id": "constant-time-login",
+        "label": "Constant-time login (dummy_verify_password)",
+        "kind": "security"
+      },
+      {
+        "id": "stale-provider-counts",
+        "label": "Stale AGENTS.md provider counts",
+        "kind": "deprecation"
+      },
+      {
+        "id": "async-is-copy",
+        "label": "AsyncMemory is a duplicate, not a wrapper",
+        "kind": "design"
+      }
+    ],
+    "searchTerms": [
+      "surprises",
+      "gotchas",
+      "ADD-only extraction",
+      "no graph memory",
+      "score_and_rank threshold fusion",
+      "entity boost attenuation",
+      "keyword_search None sentinel",
+      "lazy SDK import factory",
+      "consume_refresh_jti",
+      "dummy_verify_password unique admin",
+      "MockEmbeddings",
+      "AsyncMemoryClient blocking init",
+      "ollama litellm pip install at import",
+      "gpt-5-mini reasoning model",
+      "Azure assistant ai replace",
+      "text_lemmatized BM25",
+      "embedding dimension mismatch",
+      "OPENAI_API_BASE deprecated",
+      "scoring_prompt deprecated",
+      "infer=False fast path",
+      "dead UPDATE DELETE branch",
+      "OpenMemory MCP search bypass",
+      "stale provider counts AGENTS.md"
+    ],
+    "related": [
+      "memory-algorithm",
+      "data-flow",
+      "memory-engine",
+      "config-system",
+      "vector-stores",
+      "graph-memory",
+      "llms",
+      "embeddings",
+      "rerankers",
+      "server",
+      "client-sdk",
+      "openmemory",
+      "typescript-sdk",
+      "integrations",
+      "evaluation",
+      "architecture"
+    ]
+  }
+}

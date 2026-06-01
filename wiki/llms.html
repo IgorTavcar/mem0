@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The LLM layer is a plugin family where every provider subclasses LLMBase and implements one generate_response method returning a string or a normalised tool-call dict. There are 18 provider implementations spanning OpenAI-compatible APIs, native Anthropic/Gemini/Bedrock SDKs, local runtimes (Ollama, LM Studio, vLLM), and aggregators (LiteLLM, LangChain), wired by LlmFactory. The default is the openai provider on gpt-5-mini. Structured output is handled primarily via response_format JSON mode, with dedicated openai_structured/azure_openai_structured variants for schema-validated parsing.">
+<meta name="generator" content="mem0-wiki-build">
+<title>LLM Providers · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "LLM Providers", "description": "The LLM layer is a plugin family where every provider subclasses LLMBase and implements one generate_response method returning a string or a normalised tool-call dict. There are 18 provider implementations spanning OpenAI-compatible APIs, native Anthropic/Gemini/Bedrock SDKs, local runtimes (Ollama, LM Studio, vLLM), and aggregators (LiteLLM, LangChain), wired by LlmFactory. The default is the openai provider on gpt-5-mini. Structured output is handled primarily via response_format JSON mode, with dedicated openai_structured/azure_openai_structured variants for schema-validated parsing.", "keywords": "LLMBase, generate_response, LlmFactory, provider_to_class, BaseLlmConfig, response_format, tool_choice, openai_structured, azure_openai_structured, gpt-5-mini default model, extract_json, reasoning model gpt-5 o1 o3", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html" class="active">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Providers</span><span class="sep">/</span><span>LLM Providers</span></nav>
+    <h1>LLM Providers</h1>
+<p class="lead">The LLM layer is a plugin family: every provider subclasses <code>LLMBase</code> and implements a single <code>generate_response(messages, tools, tool_choice, response_format)</code> method that returns either a plain string or a normalised tool-call dict. There are <strong>18 provider implementations</strong> spanning OpenAI-compatible APIs, native Anthropic/Gemini/Bedrock SDKs, local runtimes (Ollama, LM Studio, vLLM), and aggregators (LiteLLM, LangChain). A <code>LlmFactory</code> maps provider names to classes; the default is the <code>openai</code> provider on model <code>gpt-5-mini</code>. The <a href="memory-algorithm.html">memory algorithm</a> drives all of these through one method, passing <code>response_format={"type": "json_object"}</code> to force structured extraction.</p>
+
+<section id="contract">
+<h2>The LLMBase contract</h2>
+<p>One abstract base, one abstract method. Everything provider-specific lives in subclasses.</p>
+
+<p>Defined in <code>mem0/llms/base.py</code>, <code>LLMBase(ABC)</code> handles config coercion and parameter shaping; subclasses own client construction, message reformatting, the API call, and response parsing.</p>
+
+<dl>
+<dt><code>__init__(config)</code></dt>
+<dd>Accepts a <code>BaseLlmConfig</code>, a dict (coerced via <code>BaseLlmConfig(**config)</code> for backward compatibility), or <code>None</code> (builds a default <code>BaseLlmConfig</code>). Then calls <code>_validate_config()</code>.</dd>
+
+<dt><code>generate_response(messages, tools=None, tool_choice="auto", **kwargs)</code> — <em>abstract</em></dt>
+<dd>The sole contract every provider must implement. <code>messages</code> is a list of <code>{"role", "content"}</code> dicts; <code>tools</code> is an optional list of OpenAI-style tool schemas; <code>tool_choice</code> defaults to <code>"auto"</code>. Returns <code>str</code> (no tools) or a normalised <code>dict</code> (with tools). Note: most concrete providers <em>add a <code>response_format</code> parameter</em> to the signature even though the abstract method does not declare it — see the gotcha below.</dd>
+
+<dt><code>_get_common_params(**kwargs)</code></dt>
+<dd>Builds <code>{temperature, max_tokens, top_p}</code> from config and merges in caller kwargs. Subclasses override it where the wire format differs (Anthropic drops one of temperature/top_p; Ollama remaps to <code>num_predict</code> inside an <code>options</code> block).</dd>
+
+<dt><code>_is_reasoning_model(model)</code> / <code>_get_supported_params(**kwargs)</code></dt>
+<dd>Reasoning-model guard. For models in the set <code>{o1, o1-preview, o3-mini, o3, gpt-5, gpt-5o, ...}</code> (and prefixes <code>o1-</code>, <code>o3-</code>, after stripping a provider prefix like <code>openai/</code>), <code>_get_supported_params</code> returns <em>only</em> <code>messages</code>, <code>response_format</code>, <code>tools</code>, <code>tool_choice</code>, plus <code>reasoning_effort</code> if configured — it strips <code>temperature</code>/<code>max_tokens</code>/<code>top_p</code> which these models reject. Otherwise it falls through to <code>_get_common_params</code>.</dd>
+</dl>
+
+<aside class="callout gotcha"><strong>Gotcha: the abstract signature is narrower than reality</strong> <code>LLMBase.generate_response</code> declares <code>(messages, tools, tool_choice, **kwargs)</code> — no <code>response_format</code>. But the engine always calls <code>generate_response(messages=..., response_format={"type": "json_object"})</code> (see <code>mem0/memory/main.py</code>). Concrete providers therefore add <code>response_format</code> explicitly. A provider that implemented only the abstract signature would still accept it via <code>**kwargs</code>, but every real provider declares it for clarity. <code>SarvamLLM</code> is the outlier: its <code>generate_response(messages, response_format=None)</code> drops <code>tools</code>/<code>tool_choice</code> entirely and accepts <code>response_format</code> only to ignore it.</aside>
+
+<details>
+<summary>Deep dive: the gpt-5/o-series reasoning guard, line by line</summary>
+<p><code>_is_reasoning_model</code> lower-cases the model, strips any <code>provider/</code> prefix, then matches an exact set plus the prefixes <code>o1-</code>, <code>o1.</code>, <code>o3-</code>, <code>o3.</code>. The comment notes it deliberately does <em>not</em> match <code>gpt-5.x</code> variants like <code>gpt-5.4-mini</code> via prefix, because those <em>do</em> support <code>temperature</code> — only the exact <code>gpt-5</code>/<code>gpt-5o</code> family names are treated as reasoning models. This matters because the default model is <code>gpt-5-mini</code>, which is <em>not</em> in the exact set and not matched by an <code>o</code>-prefix, so it goes through <code>_get_common_params</code> with full sampling params.</p>
+</details>
+</section>
+
+<section id="base-config">
+<h2>BaseLlmConfig: the shared parameter surface</h2>
+<p>One non-Pydantic config base holds the parameters common to every provider; provider-specific fields live in sibling config classes under <code>mem0/configs/llms/</code>.</p>
+
+<p><code>mem0/configs/llms/base.py</code> defines <code>BaseLlmConfig(ABC)</code> (a plain class, not a Pydantic model) with these defaults:</p>
+
+<table>
+<thead><tr><th>Field</th><th>Default</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><code>model</code></td><td><code>None</code></td><td>Filled by each provider's own default if unset</td></tr>
+<tr><td><code>temperature</code></td><td><code>0.1</code></td><td>Low for deterministic extraction</td></tr>
+<tr><td><code>api_key</code></td><td><code>None</code></td><td>Falls back to provider env var</td></tr>
+<tr><td><code>max_tokens</code></td><td><code>2000</code></td><td></td></tr>
+<tr><td><code>top_p</code></td><td><code>0.1</code></td><td></td></tr>
+<tr><td><code>top_k</code></td><td><code>1</code></td><td>Not used by all providers</td></tr>
+<tr><td><code>enable_vision</code> / <code>vision_details</code></td><td><code>False</code> / <code>"auto"</code></td><td>Vision-model toggles</td></tr>
+<tr><td><code>reasoning_effort</code></td><td><code>None</code></td><td><code>"low"/"medium"/"high"</code> for reasoning models</td></tr>
+<tr><td><code>http_client_proxies</code></td><td><code>None</code></td><td>If set, builds <code>httpx.Client(proxies=...)</code> stored as <code>self.http_client</code></td></tr>
+</tbody>
+</table>
+
+<p>Provider config subclasses (e.g. <code>OpenAIConfig</code>, <code>AnthropicConfig</code>, <code>OllamaConfig</code>, <code>AWSBedrockConfig</code>, <code>VllmConfig</code>, <code>DeepSeekConfig</code>, <code>MinimaxConfig</code>, <code>LMStudioConfig</code>, <code>AzureOpenAIConfig</code>) add fields like <code>openai_base_url</code>, <code>openrouter_base_url</code>, <code>ollama_base_url</code>, <code>azure_kwargs</code>, and so on. See <a href="config-system.html">the configuration system</a> for the full class hierarchy and how the <a href="config-system.html#factories">four factories</a> wire them.</p>
+
+<aside class="callout decision"><strong>Decision: per-provider config coercion</strong> Most providers begin <code>__init__</code> with a coercion ladder — if given <code>None</code> build the provider config, if a dict expand it, if a bare <code>BaseLlmConfig</code> copy its fields into the provider config. This lets users pass either a plain base config or a typed provider config and get the same behaviour, and is the seam where provider-specific fields (base URLs, Azure kwargs) become available.</aside>
+</section>
+
+<section id="generation-config-wiring">
+<h2>How the engine selects and configures an LLM</h2>
+<p>The provider name is a string; the factory resolves it to a class and a config class.</p>
+
+<p><code>mem0/llms/configs.py</code> defines the Pydantic <code>LlmConfig</code> with <code>provider</code> (default <code>"openai"</code>) and <code>config</code> (a dict). Its <code>validate_config</code> validator rejects any provider not in the allow-list of 18 names. The <code>LlmFactory</code> (<code>mem0/utils/factory.py</code>) then maps each name to <code>(class_path, config_class)</code> and lazily imports the class via <code>importlib</code>:</p>
+
+<pre><code class="language-python"># mem0/utils/factory.py (excerpt)
+provider_to_class = {
+    "openai":      ("mem0.llms.openai.OpenAILLM",        OpenAIConfig),
+    "anthropic":   ("mem0.llms.anthropic.AnthropicLLM",  AnthropicConfig),
+    "aws_bedrock": ("mem0.llms.aws_bedrock.AWSBedrockLLM", AWSBedrockConfig),
+    "openai_structured": ("mem0.llms.openai_structured.OpenAIStructuredLLM", OpenAIConfig),
+    ...  # 18 entries total
+}
+</code></pre>
+
+<aside class="callout insight"><strong>Insight: lazy import = optional dependencies</strong> The factory stores class <em>paths</em> as strings and imports them only when a provider is actually requested. That is why <code>anthropic.py</code>, <code>ollama.py</code>, <code>groq.py</code>, <code>together.py</code>, <code>litellm.py</code>, <code>aws_bedrock.py</code>, <code>gemini.py</code> all wrap their SDK import in a <code>try/except ImportError</code> that re-raises with a <code>pip install</code> hint. You only pay for the SDKs of providers you use.</aside>
+
+<p><code>mem0/llms/__init__.py</code> is empty — providers are never re-exported there; the factory is the single entry point. The <a href="memory-engine.html">Memory engine</a> builds its LLM once in <code>__init__</code> via <code>LlmFactory.create(self.config.llm.provider, self.config.llm.config)</code> and reuses it for every extraction/update call.</p>
+</section>
+
+<section id="provider-catalog">
+<h2>Provider catalogue (18 implementations)</h2>
+<p>Counted directly from <code>mem0/llms/</code> excluding <code>base.py</code>, <code>configs.py</code>, <code>__init__.py</code>. Grouped by family below.</p>
+
+<table>
+<thead><tr><th>Provider key</th><th>Class / file</th><th>Family</th><th>SDK / transport</th><th>Default model</th><th>Tools?</th></tr></thead>
+<tbody>
+<tr><td><code>openai</code></td><td><code>OpenAILLM</code> · openai.py</td><td>OpenAI</td><td><code>openai.OpenAI</code></td><td><code>gpt-5-mini</code></td><td>yes</td></tr>
+<tr><td><code>openai_structured</code></td><td><code>OpenAIStructuredLLM</code> · openai_structured.py</td><td>OpenAI (structured)</td><td><code>beta.chat.completions.parse</code></td><td><code>gpt-5-mini</code></td><td>yes</td></tr>
+<tr><td><code>azure_openai</code></td><td><code>AzureOpenAILLM</code> · azure_openai.py</td><td>Azure</td><td><code>openai.AzureOpenAI</code></td><td><code>gpt-5-mini</code></td><td>yes</td></tr>
+<tr><td><code>azure_openai_structured</code></td><td><code>AzureOpenAIStructuredLLM</code> · azure_openai_structured.py</td><td>Azure (structured)</td><td><code>openai.AzureOpenAI</code></td><td><code>gpt-5-mini</code></td><td>yes</td></tr>
+<tr><td><code>anthropic</code></td><td><code>AnthropicLLM</code> · anthropic.py</td><td>Anthropic</td><td><code>anthropic.Anthropic</code></td><td><code>claude-3-5-sonnet-20240620</code></td><td>yes</td></tr>
+<tr><td><code>aws_bedrock</code></td><td><code>AWSBedrockLLM</code> · aws_bedrock.py</td><td>AWS Bedrock</td><td><code>boto3</code> (Converse / invoke_model)</td><td><em>none</em> (config-required)</td><td>partial</td></tr>
+<tr><td><code>gemini</code></td><td><code>GeminiLLM</code> · gemini.py</td><td>Google</td><td><code>google.genai</code></td><td><code>gemini-2.0-flash</code></td><td>yes</td></tr>
+<tr><td><code>ollama</code></td><td><code>OllamaLLM</code> · ollama.py</td><td>Local</td><td><code>ollama.Client</code></td><td><code>llama3.1:70b</code></td><td>yes</td></tr>
+<tr><td><code>lmstudio</code></td><td><code>LMStudioLLM</code> · lmstudio.py</td><td>Local</td><td><code>openai.OpenAI</code> (OpenAI-compat)</td><td>Meta-Llama-3.1-70B GGUF</td><td>yes</td></tr>
+<tr><td><code>vllm</code></td><td><code>VllmLLM</code> · vllm.py</td><td>Local</td><td><code>openai.OpenAI</code> (OpenAI-compat)</td><td><code>Qwen/Qwen2.5-32B-Instruct</code></td><td>yes</td></tr>
+<tr><td><code>litellm</code></td><td><code>LiteLLM</code> · litellm.py</td><td>Aggregator</td><td><code>litellm.completion</code></td><td><code>gpt-5-mini</code></td><td>yes (guarded)</td></tr>
+<tr><td><code>langchain</code></td><td><code>LangchainLLM</code> · langchain.py</td><td>Aggregator</td><td>LangChain <code>BaseChatModel</code></td><td><em>none</em> (instance-required)</td><td>yes</td></tr>
+<tr><td><code>groq</code></td><td><code>GroqLLM</code> · groq.py</td><td>Other</td><td><code>groq.Groq</code></td><td><code>llama-3.3-70b-versatile</code></td><td>yes</td></tr>
+<tr><td><code>together</code></td><td><code>TogetherLLM</code> · together.py</td><td>Other</td><td><code>together.Together</code></td><td>Mixtral-8x7B-Instruct-v0.1</td><td>yes</td></tr>
+<tr><td><code>deepseek</code></td><td><code>DeepSeekLLM</code> · deepseek.py</td><td>Other (OpenAI-compat)</td><td><code>openai.OpenAI</code></td><td><code>deepseek-chat</code></td><td>yes</td></tr>
+<tr><td><code>xai</code></td><td><code>XAILLM</code> · xai.py</td><td>Other (OpenAI-compat)</td><td><code>openai.OpenAI</code></td><td><code>grok-2-latest</code></td><td><strong>no</strong></td></tr>
+<tr><td><code>sarvam</code></td><td><code>SarvamLLM</code> · sarvam.py</td><td>Other</td><td>raw <code>requests.post</code></td><td><code>sarvam-m</code></td><td><strong>no</strong></td></tr>
+<tr><td><code>minimax</code></td><td><code>MiniMaxLLM</code> · minimax.py</td><td>Other (OpenAI-compat)</td><td><code>openai.OpenAI</code></td><td><code>MiniMax-M2.7</code></td><td>yes</td></tr>
+</tbody>
+</table>
+
+<aside class="callout perf"><strong>Default = openai / gpt-5-mini</strong> With no config, <code>LlmConfig</code> defaults <code>provider="openai"</code>, and <code>OpenAILLM</code> sets <code>self.config.model = "gpt-5-mini"</code> when none is given. The same <code>gpt-5-mini</code> default is shared by <code>openai_structured</code>, both Azure variants, and <code>litellm</code>.</aside>
+
+<h3>OpenAI-compatible family</h3>
+<p>The largest cluster. <code>openai</code>, <code>deepseek</code>, <code>xai</code>, <code>minimax</code>, <code>vllm</code>, and <code>lmstudio</code> all instantiate <code>openai.OpenAI</code> with a provider-specific <code>base_url</code> and reuse the same <code>chat.completions.create</code> call and the same <code>_parse_response</code> shape. <code>OpenAILLM</code> additionally supports <strong>OpenRouter</strong>: if <code>OPENROUTER_API_KEY</code> is set it swaps the base URL to <code>https://openrouter.ai/api/v1</code> and threads through <code>models</code>/<code>route</code>/<code>HTTP-Referer</code>/<code>X-Title</code> headers.</p>
+
+<aside class="callout gotcha"><strong>Gotcha: <code>store</code> is opt-in for compatibility</strong> <code>OpenAILLM</code> only sends OpenAI's <code>store</code> parameter when <code>self.config.store is not None</code>, with an explicit comment that OpenAI-compatible backends (Gemini, Groq, vLLM via the OpenAI client) reject unknown fields. Sending <code>store</code> unconditionally would break those backends.</aside>
+
+<h3>Anthropic</h3>
+<p><code>AnthropicLLM</code> uses the native <code>anthropic.Anthropic</code> client and the Messages API. Two adaptations: (1) it splits out the <code>system</code> message into the top-level <code>system</code> parameter and passes the rest as <code>messages</code>; (2) it overrides <code>_get_common_params</code> to <strong>never send both <code>temperature</code> and <code>top_p</code></strong> — Anthropic rejects that, so it keeps <code>temperature</code> and drops <code>top_p</code>. It returns <code>response.content[0].text</code>. Default model <code>claude-3-5-sonnet-20240620</code>.</p>
+
+<h3>AWS Bedrock</h3>
+<p><code>AWSBedrockLLM</code> is by far the most complex provider (~700 lines) because Bedrock multiplexes many model families behind one runtime. It detects the family from the model id via <code>extract_provider()</code> against a <code>PROVIDERS</code> list (ai21, amazon, anthropic, cohere, meta, mistral, stability, writer, deepseek, gpt-oss, perplexity, snowflake, titan, command, j2, llama, minimax) and then sets capability flags and a per-family message formatter.</p>
+<dl>
+<dt>Two API paths</dt>
+<dd><code>converse()</code> for tool-capable / modern models (Anthropic, Amazon Nova, MiniMax) and legacy <code>invoke_model()</code> with per-family JSON body shapes (<code>maxTokenCount</code>/<code>topP</code> for Amazon, <code>max_gen_len</code> for Meta, etc.) for the rest.</dd>
+<dt>Capability gating</dt>
+<dd><code>supports_tools</code> is only true for <code>anthropic</code>, <code>cohere</code>, <code>amazon</code>. <code>generate_response</code> routes to <code>_generate_with_tools</code> only when <code>tools and self.supports_tools</code>, else falls back to standard generation. MiniMax M2.x is intentionally excluded from tool support (tool use is only available via the OpenAI-compatible bedrock-mantle endpoint, not the Converse API used here).</dd>
+<dt>top_p / temperature conflict</dt>
+<dd><code>_build_inference_config</code> omits <code>topP</code> for <code>anthropic</code> and <code>minimax</code> because both raise a ValidationException when temperature and topP are both present — mirroring the native Anthropic provider's rule.</dd>
+<dt>Connection test on init</dt>
+<dd><code>_test_connection</code> calls <code>list_foundation_models</code> and warns (does not fail) if the configured model isn't found in the region.</dd>
+</dl>
+
+<aside class="callout perf"><strong>Perf: Bedrock pings the control plane at startup</strong> Constructing <code>AWSBedrockLLM</code> performs a live <code>list_foundation_models</code> call to validate the region/model. Since the engine builds the LLM eagerly in its constructor, this adds a network round-trip to <code>Memory(...)</code> setup for Bedrock users (failures are caught and downgraded to a warning).</aside>
+
+<h3>Google Gemini</h3>
+<p><code>GeminiLLM</code> uses <code>google.genai</code>. It reshapes messages into <code>types.Content</code> objects, lifts the system message to <code>system_instruction</code>, and converts OpenAI-style tool schemas into <code>types.FunctionDeclaration</code> — recursively stripping <code>additionalProperties</code>, which Gemini's schema validator rejects. <code>tool_choice</code> maps to <code>FunctionCallingConfigMode</code> (<code>AUTO</code>/<code>ANY</code>/<code>NONE</code>); <code>"any"</code> also restricts <code>allowed_function_names</code>. JSON mode is requested via <code>response_mime_type="application/json"</code> (plus an optional <code>response_schema</code>). It guards against blocked responses where <code>candidate.content</code> is <code>None</code>.</p>
+
+<h3>Azure (and the *_structured variants)</h3>
+<p>Both Azure classes use <code>openai.AzureOpenAI</code>, read <code>LLM_AZURE_*</code> env vars via <code>config.azure_kwargs</code>, and fall back to <code>DefaultAzureCredential</code> + bearer-token provider when no API key (or the placeholder <code>"your-api-key"</code>) is given. Both rewrite the last user message, replacing the literal word <code>"assistant"</code> with <code>"ai"</code> before sending — a workaround documented inline in the code.</p>
+
+<h3>Local runtimes</h3>
+<dl>
+<dt><code>ollama</code></dt>
+<dd>Native <code>ollama.Client</code>. Remaps sampling params into an <code>options</code> block (<code>num_predict</code> instead of <code>max_tokens</code>), and for JSON mode sets <code>format="json"</code> <em>and</em> appends a "respond with valid JSON only" instruction as a belt-and-braces fallback. Its <code>_parse_response</code> handles both dict and object response shapes.</dd>
+<dt><code>lmstudio</code></dt>
+<dd>OpenAI-compatible client against the local LM Studio server. Notable: it <strong>always</strong> sends a <code>response_format</code> — config override, then the caller's value, else defaults to <code>{"type": "json_object"}</code>.</dd>
+<dt><code>vllm</code></dt>
+<dd>OpenAI-compatible client against a self-hosted vLLM server; api key defaults to the literal <code>"vllm-api-key"</code> if none provided.</dd>
+</dl>
+
+<h3>Aggregators</h3>
+<dl>
+<dt><code>litellm</code></dt>
+<dd>Routes through <code>litellm.completion</code>, reaching ~100 providers. It pre-checks <code>litellm.supports_function_calling(model)</code> and raises a <code>ValueError</code> if the model can't do function calling — relevant because the <a href="memory-algorithm.html">extraction path</a> may pass tools.</dd>
+<dt><code>langchain</code></dt>
+<dd>Wraps an arbitrary LangChain <code>BaseChatModel</code> <em>instance</em> passed as <code>config.model</code> (it validates the instance type and raises if it's a string). Converts roles to LangChain tuples (<code>system</code>/<code>human</code>/<code>ai</code>), uses <code>bind_tools</code> for tool calling, and ignores <code>response_format</code> entirely.</dd>
+</dl>
+
+<h3>Other hosted providers</h3>
+<p><code>groq</code> (native <code>groq.Groq</code>), <code>together</code> (native <code>together.Together</code>), <code>deepseek</code> / <code>xai</code> / <code>minimax</code> (OpenAI-compatible base URLs), and <code>sarvam</code> (a hand-rolled <code>requests.post</code> to <code>/chat/completions</code>). <code>sarvam</code> requires its API key at construction (raises otherwise) and can pull extra params like <code>frequency_penalty</code>/<code>seed</code> when <code>model</code> is given as a dict.</p>
+
+<aside class="callout gotcha"><strong>Gotcha: <code>xai</code> and <code>sarvam</code> silently ignore tools</strong> <code>XAILLM.generate_response</code> and <code>SarvamLLM.generate_response</code> do not accept or forward <code>tools</code>/<code>tool_choice</code> — XAI's signature has no tool params and Sarvam's signature is just <code>(messages, response_format=None)</code>. With the current ADD-only <a href="memory-algorithm.html">extraction algorithm</a> the engine relies on <code>response_format</code> JSON rather than tools, so these still work for memory extraction, but any caller expecting tool calls from them will get plain text.</aside>
+</section>
+
+<section id="structured-output">
+<h2>Structured output and tool calling</h2>
+<p>The engine prefers JSON-mode extraction over tool calls; the two <code>*_structured</code> providers exist for stricter schema-validated parsing on OpenAI/Azure.</p>
+
+<h3>Two mechanisms, one normalised output</h3>
+<dl>
+<dt>JSON response format</dt>
+<dd>The dominant path. The <a href="data-flow.html">add/search flow</a> calls <code>generate_response(..., response_format={"type": "json_object"})</code> and parses the returned string as JSON. Each provider maps this onto its native JSON mode: OpenAI/Azure pass it through, Gemini sets <code>response_mime_type</code>, Ollama sets <code>format="json"</code>.</dd>
+<dt>Tool / function calling</dt>
+<dd>When <code>tools</code> is supplied, providers append <code>tools</code> + <code>tool_choice</code> to the request and run <code>_parse_response</code>, returning a normalised dict <code>{"content": ..., "tool_calls": [{"name", "arguments"}, ...]}</code>. Several providers carry a <code># TODO: Remove tools if no issues found with new memory addition logic</code> comment, signalling that tool-based extraction is on its way out in favour of the JSON path.</dd>
+</dl>
+
+<h3>The normalised tool-call shape</h3>
+<p>Every OpenAI-compatible <code>_parse_response</code> produces the same structure, decoding arguments with <code>mem0.memory.utils.extract_json</code> before <code>json.loads</code>:</p>
+<pre><code class="language-python"># shared pattern across openai/azure/litellm/groq/together/deepseek/vllm/lmstudio/minimax
+{
+  "content": response.choices[0].message.content,
+  "tool_calls": [
+    {"name": tc.function.name,
+     "arguments": json.loads(extract_json(tc.function.arguments))}
+  ],
+}
+</code></pre>
+
+<aside class="callout insight"><strong>Insight: <code>extract_json</code> hardens against fenced/dirty JSON</strong> Tool arguments and JSON-mode bodies are run through <code>extract_json</code> (in <code>mem0/memory/utils.py</code>) before parsing. This salvages JSON wrapped in markdown code fences or surrounded by prose — a recurring failure mode with smaller/local models. Bedrock even round-trips through it (<code>json.loads(extract_json(json.dumps(tool_use["input"])))</code>) to normalise dict input.</aside>
+
+<h3>Why the <code>*_structured</code> variants exist</h3>
+<p><code>openai_structured</code> and <code>azure_openai_structured</code> are dedicated providers, not flags, because they use a <em>different OpenAI SDK call</em>:</p>
+<dl>
+<dt><code>OpenAIStructuredLLM</code></dt>
+<dd>Calls <code>client.beta.chat.completions.parse(**params)</code> (the schema-parsing beta endpoint) instead of <code>chat.completions.create</code>. It accepts a Pydantic/schema object as <code>response_format</code> and lets the SDK validate the response against it. It is a minimal class — no reasoning-model param filtering, no OpenRouter, no callback — just model/messages/temperature plus optional response_format and tools.</dd>
+<dt><code>AzureOpenAIStructuredLLM</code></dt>
+<dd>Confusingly, this one still calls <code>chat.completions.create</code> (not <code>.parse</code>) — it is effectively the same wire call as <code>AzureOpenAILLM</code> but a leaner implementation. It carries the same <code>assistant</code>→<code>ai</code> last-message rewrite and the <code>DefaultAzureCredential</code> fallback.</dd>
+</dl>
+
+<aside class="callout decision"><strong>Decision: structured = separate provider key</strong> Rather than overloading a config flag, the team registered <code>openai_structured</code> / <code>azure_openai_structured</code> as first-class provider keys in <code>LlmFactory.provider_to_class</code> (both reusing <code>OpenAIConfig</code>). Users opt in by setting <code>llm.provider = "openai_structured"</code>. This keeps the standard providers' hot path on the stable <code>create</code> endpoint while isolating the beta <code>parse</code> API.</aside>
+
+<details>
+<summary>Deep dive: how a single extraction call fans out across providers</summary>
+<p>The <a href="memory-engine.html">Memory engine</a> issues one provider-agnostic call: <code>self.llm.generate_response(messages=[system, user], response_format={"type": "json_object"})</code>. Each provider translates that uniformly:</p>
+<ul>
+<li><strong>OpenAI/Azure/Groq/Together/DeepSeek/vLLM/MiniMax</strong>: <code>response_format</code> passed straight to <code>chat.completions.create</code>; returns <code>message.content</code> (a JSON string).</li>
+<li><strong>Anthropic</strong>: <code>response_format</code> is accepted but Anthropic's Messages API has no JSON-mode field, so the JSON shape relies on the prompt; returns <code>content[0].text</code>.</li>
+<li><strong>Gemini</strong>: converts to <code>response_mime_type="application/json"</code>.</li>
+<li><strong>Ollama</strong>: sets <code>format="json"</code> and appends a JSON instruction.</li>
+<li><strong>LM Studio</strong>: forces <code>{"type": "json_object"}</code> even if none requested.</li>
+<li><strong>LangChain / Sarvam / XAI</strong>: ignore <code>response_format</code> — rely on prompt-level JSON instructions.</li>
+</ul>
+<p>The engine then JSON-parses the returned string. This is why the algorithm tolerates providers without native JSON mode.</p>
+</details>
+</section>
+
+<section id="flow">
+<h2>Where the LLM layer sits in the system</h2>
+<p>The LLM is one of the four config-driven plugin layers, alongside <a href="embeddings.html">embeddings</a>, <a href="vector-stores.html">vector stores</a>, and <a href="rerankers.html">rerankers</a>.</p>
+
+<pre class="mermaid">
+flowchart LR
+  MC[MemoryConfig.llm] --> LF[LlmFactory.create]
+  LF --> P[provider_to_class lookup]
+  P --> I[LLMBase subclass]
+  I -->|generate_response| ENG[Memory engine extraction/update]
+  ENG -->|response_format json| I
+  I -->|str or tool_call dict| ENG
+</pre>
+
+<ul>
+<li><strong>Configured</strong> through <code>MemoryConfig.llm</code> (<code>LlmConfig</code>) — see <a href="config-system.html">configuration</a>.</li>
+<li><strong>Constructed</strong> once by the <a href="memory-engine.html">Memory/AsyncMemory</a> constructor via <code>LlmFactory.create</code>.</li>
+<li><strong>Invoked</strong> in the <a href="memory-algorithm.html">single-pass extraction algorithm</a> and during procedural-memory summarisation (<code>generate_response(messages=...)</code> with no JSON format).</li>
+<li><strong>Distinct from</strong> the hosted <a href="client-sdk.html">proxy LLM wrapper</a>, which intercepts an outbound chat completion to inject memories — that lives in the client SDK, not this provider layer.</li>
+<li>The <a href="rerankers.html">LLM reranker</a> reuses this same provider layer to score candidates with an LLM.</li>
+</ul>
+
+<aside class="callout security"><strong>Security: API keys via env fallback</strong> Every provider resolves its key as <code>config.api_key or os.getenv("&lt;PROVIDER&gt;_API_KEY")</code> (e.g. <code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, <code>GROQ_API_KEY</code>). Keys can be supplied in code or left to the environment; nothing is logged. Azure additionally supports keyless auth through <code>DefaultAzureCredential</code> when no key is set.</aside>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li><a href="config-system.html">Configuration System</a></li><li><a href="memory-algorithm.html">Memory Algorithm</a></li></ul></div><div><h4>Used by</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="client-sdk.html">Hosted Client &amp; Proxy</a></li><li><a href="config-system.html">Configuration System</a></li><li><a href="data-flow.html">Data Flow</a></li><li><a href="memory-engine.html">Memory Engine</a></li><li><a href="openmemory.html">OpenMemory Platform</a></li><li><a href="rerankers.html">Rerankers</a></li><li><a href="server.html">Self-Hosted Server</a></li><li><a href="typescript-sdk.html">TypeScript SDK</a></li></ul></div><div><h4>Related</h4><ul><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li><li><a href="vector-stores.html">Vector Stores</a></li></ul></div><div><h4>Source files</h4><ul><li><code>mem0/llms/base.py</code> — Abstract base: generate_response contract, reasoning-model param filtering (_is_reasoning_model, _get_supported_params), _get_common_params</li><li><code>mem0/configs/llms/base.py</code> — Shared non-Pydantic config: model/temperature/max_tokens/top_p/top_k/reasoning_effort/http proxies and defaults</li><li><code>mem0/llms/configs.py</code> — Pydantic provider+config wrapper with validate_config allow-list of 18 provider names</li><li><code>mem0/utils/factory.py</code> — Maps 18 provider keys to (class_path, config_class); lazy importlib loading</li><li><code>mem0/llms/openai.py</code> — Default provider; OpenRouter support, opt-in store param, _parse_response tool-call shape, default gpt-5-mini</li><li><code>mem0/llms/anthropic.py</code> — Native Messages API; system-message split; drops top_p when temperature set</li><li><code>mem0/llms/aws_bedrock.py</code> — Multi-family Converse/invoke_model routing, capability gating, startup list_foundation_models check</li><li><code>mem0/llms/openai_structured.py</code> — Uses beta.chat.completions.parse for schema-validated structured output</li><li><code>mem0/llms/azure_openai_structured.py</code> — Structured Azure variant that still calls chat.completions.create; assistant-&gt;ai rewrite</li><li><code>mem0/llms/gemini.py</code> — google.genai; strips additionalProperties from tool schemas; FunctionCallingConfigMode mapping; JSON via response_mime_type</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

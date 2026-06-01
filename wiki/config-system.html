@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="mem0 is configuration-driven: a single Pydantic v2 MemoryConfig (in mem0/configs/base.py) aggregates four {provider, config} sub-config wrappers for the LLM, embedder, vector store, and optional reranker, plus scalar settings like history_db_path, version, and custom_instructions. Four factories in mem0/utils/factory.py (LlmFactory, EmbedderFactory, VectorStoreFactory, RerankerFactory) map provider strings to implementation class paths and lazily import them via load_class(), turning config dicts into live provider instances. The default stack is OpenAI LLM + embedder + local Qdrant, so a bare Memory() works with just OPENAI_API_KEY. Both nested-dict (Memory.from_config) and typed-object construction converge on the same validated tree.">
+<meta name="generator" content="mem0-wiki-build">
+<title>Configuration System · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Configuration System", "description": "mem0 is configuration-driven: a single Pydantic v2 MemoryConfig (in mem0/configs/base.py) aggregates four {provider, config} sub-config wrappers for the LLM, embedder, vector store, and optional reranker, plus scalar settings like history_db_path, version, and custom_instructions. Four factories in mem0/utils/factory.py (LlmFactory, EmbedderFactory, VectorStoreFactory, RerankerFactory) map provider strings to implementation class paths and lazily import them via load_class(), turning config dicts into live provider instances. The default stack is OpenAI LLM + embedder + local Qdrant, so a bare Memory() works with just OPENAI_API_KEY. Both nested-dict (Memory.from_config) and typed-object construction converge on the same validated tree.", "keywords": "MemoryConfig, mem0 configuration, provider config, LlmFactory, EmbedderFactory, VectorStoreFactory, RerankerFactory, load_class, provider_to_class, LlmConfig, EmbedderConfig, VectorStoreConfig", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html" class="active">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Core</span><span class="sep">/</span><span>Configuration System</span></nav>
+    <h1>Configuration System</h1>
+<p class="lead">mem0 is configuration-driven: a single Pydantic v2 <code>MemoryConfig</code> object selects which LLM, embedder, vector store, and (optional) reranker back the memory engine, while four string-keyed factories turn <code>{provider, config}</code> pairs into live provider instances via lazy <code>importlib</code> dispatch. Every subsystem can be supplied either as a nested Python dict or as typed config objects; both paths converge on the same validated model. The default stack is OpenAI for both the LLM and embedder plus a local Qdrant vector store, so a bare <code>Memory()</code> works with nothing but an <code>OPENAI_API_KEY</code>.</p>
+
+<section id="overview">
+<h2>Overview &amp; role in the architecture</h2>
+<p>The configuration layer is the wiring harness described in the <a href="architecture.html">architecture overview</a>: it is the seam where the provider plugin pattern is realised. Nothing in <code>mem0/memory/main.py</code> hard-codes a provider class; instead <a href="memory-engine.html">the Memory engine</a> reads <code>self.config</code> and asks the factories to build the pieces.</p>
+<ul>
+<li><strong>Schema</strong> lives in <code>mem0/configs/</code> — the top-level <code>MemoryConfig</code> (in <code>mem0/configs/base.py</code>) plus the four sub-config wrappers and the per-provider config classes under <code>mem0/configs/llms/</code>, <code>mem0/configs/embeddings/</code>, <code>mem0/configs/vector_stores/</code>, and <code>mem0/configs/rerankers/</code>.</li>
+<li><strong>Wrappers</strong> (<code>LlmConfig</code>, <code>EmbedderConfig</code>, <code>VectorStoreConfig</code>, <code>RerankerConfig</code>) each hold a <code>provider</code> string and a free-form <code>config</code> dict, and validate that the provider is recognised.</li>
+<li><strong>Factories</strong> live in <code>mem0/utils/factory.py</code>: <code>LlmFactory</code>, <code>EmbedderFactory</code>, <code>VectorStoreFactory</code>, <code>RerankerFactory</code>. Each maps a provider string to an implementation class path and instantiates it.</li>
+</ul>
+<aside class="callout decision"><strong>Decision</strong> The two-level split — a thin <code>{provider, config}</code> Pydantic wrapper at the schema layer plus a separate string→class map at the factory layer — means the schema never imports heavy provider SDKs. The wrapper only validates that the provider <em>name</em> is allowed; the actual class (and its dependency, e.g. <code>qdrant_client</code>) is imported lazily by <code>load_class()</code> only when the factory runs.</aside>
+</section>
+
+<section id="memory-config">
+<h2>MemoryConfig: the root model</h2>
+<p>One-sentence summary: <code>MemoryConfig</code> is a Pydantic v2 <code>BaseModel</code> aggregating four provider sub-configs plus a handful of scalar settings, all with safe defaults.</p>
+
+<h3>Fields</h3>
+<dl>
+<dt><code>vector_store: VectorStoreConfig</code></dt>
+<dd><code>default_factory=VectorStoreConfig</code> → defaults to provider <code>"qdrant"</code>.</dd>
+<dt><code>llm: LlmConfig</code></dt>
+<dd><code>default_factory=LlmConfig</code> → defaults to provider <code>"openai"</code>.</dd>
+<dt><code>embedder: EmbedderConfig</code></dt>
+<dd><code>default_factory=EmbedderConfig</code> → defaults to provider <code>"openai"</code>.</dd>
+<dt><code>reranker: Optional[RerankerConfig]</code></dt>
+<dd>Defaults to <code>None</code>. When unset, the engine sets <code>self.reranker = None</code> and skips the rerank step entirely. See <a href="rerankers.html">the rerankers page</a>.</dd>
+<dt><code>history_db_path: str</code></dt>
+<dd>Path to the SQLite audit/history DB. Defaults to <code>os.path.join(mem0_dir, "history.db")</code> where <code>mem0_dir</code> is <code>$MEM0_DIR</code> or <code>~/.mem0</code>. Consumed by the engine's <code>SQLiteManager</code> (see <a href="memory-engine.html">memory engine</a>).</dd>
+<dt><code>version: str</code></dt>
+<dd>API version string, default <code>"v1.1"</code>. Stored as <code>self.api_version</code> and steers result shaping in <a href="data-flow.html">add/search flows</a>.</dd>
+<dt><code>custom_instructions: Optional[str]</code></dt>
+<dd>User-supplied fact-extraction guidance, default <code>None</code>. Stored as <code>self.custom_instructions</code> and threaded into the extraction prompt by <a href="memory-algorithm.html">the algorithm</a>.</dd>
+</dl>
+
+<aside class="callout gotcha"><strong>Gotcha</strong> Despite older docs/wikis referring to <code>custom_fact_extraction_prompt</code> / <code>custom_update_memory_prompt</code> on <code>MemoryConfig</code>, the model in <code>mem0/configs/base.py</code> exposes a single <code>custom_instructions</code> field. The <em>update-memory</em> prompt has its own parameter (<code>custom_update_memory_prompt</code>) but only inside <code>get_update_memory_messages()</code> in <code>mem0/configs/prompts.py</code> — it is not a <code>MemoryConfig</code> field. At <code>add()</code> time a per-call <code>prompt=</code> argument can override <code>custom_instructions</code> (<code>custom_instr = prompt or self.custom_instructions</code> in <code>mem0/memory/main.py</code>).</aside>
+
+<aside class="callout gotcha"><strong>Gotcha</strong> There is no <code>graph_store</code> field on <code>MemoryConfig</code>. Graph memory has been removed from the OSS core — see <a href="graph-memory.html">graph memory (deprecated)</a>; entity linking via a per-collection entity store (<code>{collection}_entities</code>) replaces it, built lazily through <code>VectorStoreFactory</code>.</aside>
+
+<h3>AzureConfig</h3>
+<p><code>mem0/configs/base.py</code> also defines <code>AzureConfig</code> (a Pydantic model with <code>api_key</code>, <code>azure_deployment</code>, <code>azure_endpoint</code>, <code>api_version</code>, <code>default_headers</code>). It is reused by Azure LLM/embedder provider configs and nested under <code>azure_kwargs</code> in <code>BaseEmbedderConfig</code>.</p>
+
+<details><summary>Deep dive: MemoryItem is also in base.py</summary>
+<p><code>mem0/configs/base.py</code> additionally defines <code>MemoryItem</code> — the Pydantic shape of a single returned memory (<code>id</code>, <code>memory</code>, <code>hash</code>, <code>metadata</code>, <code>score</code>, <code>created_at</code>, <code>updated_at</code>). It is a result/DTO type, not part of the configuration tree, but it lives in the same module.</p>
+</details>
+</section>
+
+<section id="wrappers">
+<h2>The four sub-config wrappers</h2>
+<p>One-sentence summary: each subsystem is configured by a thin <code>{provider: str, config: dict}</code> wrapper that validates the provider name and (for vector stores) eagerly materialises a typed provider-config object.</p>
+
+<table>
+<thead><tr><th>Wrapper</th><th>File</th><th>provider default</th><th>config default</th><th>Validation style</th></tr></thead>
+<tbody>
+<tr><td><code>LlmConfig</code></td><td><code>mem0/llms/configs.py</code></td><td><code>"openai"</code></td><td><code>{}</code></td><td><code>@field_validator("config")</code> — checks provider is in an allow-list, returns <code>config</code> dict unchanged</td></tr>
+<tr><td><code>EmbedderConfig</code></td><td><code>mem0/embeddings/configs.py</code></td><td><code>"openai"</code></td><td><code>{}</code></td><td><code>@field_validator("config")</code> — provider allow-list check, returns dict unchanged</td></tr>
+<tr><td><code>VectorStoreConfig</code></td><td><code>mem0/vector_stores/configs.py</code></td><td><code>"qdrant"</code></td><td><code>None</code></td><td><code>@model_validator(mode="after")</code> — imports &amp; instantiates the provider config <em>class</em></td></tr>
+<tr><td><code>RerankerConfig</code></td><td><code>mem0/configs/rerankers/config.py</code></td><td><code>"cohere"</code></td><td><code>None</code></td><td>none on the wrapper; <code>model_config = {"extra": "forbid"}</code></td></tr>
+</tbody>
+</table>
+
+<aside class="callout insight"><strong>Insight</strong> The wrappers are <em>asymmetric</em>. <code>LlmConfig</code> and <code>EmbedderConfig</code> leave <code>config</code> as a raw dict and defer all typing to factory time. <code>VectorStoreConfig</code> is the odd one out: its <code>@model_validator(mode="after")</code> immediately turns the dict into a typed provider config object (e.g. <code>QdrantConfig</code>) <em>at construction time</em>. That is why the engine can read <code>self.config.vector_store.config.collection_name</code> as an attribute, while LLM/embedder configs remain dicts until their factory runs.</aside>
+
+<h3>LlmConfig &amp; EmbedderConfig validation</h3>
+<p>Both use a Pydantic v2 <code>@field_validator("config")</code> that reads the sibling <code>provider</code> via <code>values.data.get("provider")</code> and raises <code>ValueError(f"Unsupported ... provider: {provider}")</code> if it is not in a hard-coded allow-list. The LLM allow-list contains 18 names (the same set as <code>LlmFactory.provider_to_class</code> keys); the embedder list contains 11. The validator does <em>not</em> inspect the contents of <code>config</code> — provider-specific keys are validated later, when the factory builds the config object.</p>
+
+<h3>VectorStoreConfig: eager class resolution</h3>
+<p><code>VectorStoreConfig</code> carries a private <code>_provider_configs</code> dict mapping provider name → config class <em>name</em> (e.g. <code>"qdrant" → "QdrantConfig"</code>, <code>"pgvector" → "PGVectorConfig"</code>). Its post-validator:</p>
+<ol>
+<li>Rejects unknown providers (<code>ValueError: Unsupported vector store provider</code>).</li>
+<li><code>__import__("mem0.configs.vector_stores.{provider}", fromlist=[ClassName])</code> and <code>getattr</code>s the class.</li>
+<li>If <code>config is None</code>, treats it as <code>{}</code>.</li>
+<li>If a dict and the class declares a <code>path</code> annotation but none was supplied, injects a default <code>path = f"/tmp/{provider}"</code>.</li>
+<li>Replaces <code>self.config</code> with <code>config_class(**config)</code> — a typed, validated object.</li>
+</ol>
+<aside class="callout gotcha"><strong>Gotcha</strong> If you pass an already-constructed provider-config object (not a dict), the validator only checks <code>isinstance(config, config_class)</code> and returns; it skips the <code>/tmp/{provider}</code> path injection. So object-style and dict-style configs are <em>not</em> perfectly interchangeable for file-backed stores — a dict gets a free <code>/tmp/qdrant</code> path, a bare object does not. For Qdrant specifically the <code>QdrantConfig</code> default is <code>path="/tmp/qdrant"</code> anyway, and its own validator requires one of: <code>path</code>, <code>(host, port)</code>, or <code>(url, api_key)</code>.</aside>
+</section>
+
+<section id="provider-configs">
+<h2>Provider-specific config classes</h2>
+<p>One-sentence summary: each provider that needs more than the common parameters ships a dedicated config class; the rest fall back to a shared base config.</p>
+
+<h3>LLM configs — <code>mem0/configs/llms/</code></h3>
+<p><code>BaseLlmConfig</code> (in <code>base.py</code>) is a plain <code>ABC</code> (not Pydantic) holding the parameters common to every LLM: <code>model</code>, <code>temperature</code> (0.1), <code>api_key</code>, <code>max_tokens</code> (2000), <code>top_p</code> (0.1), <code>top_k</code> (1), <code>enable_vision</code>, <code>vision_details</code> (<code>"auto"</code>), <code>reasoning_effort</code>, and <code>http_client_proxies</code> (which becomes an <code>httpx.Client</code>). Nine providers subclass it for extra fields: <code>anthropic</code>, <code>aws_bedrock</code>, <code>azure</code>, <code>deepseek</code>, <code>lmstudio</code>, <code>minimax</code>, <code>ollama</code>, <code>openai</code>, <code>vllm</code>. For example <code>OpenAIConfig</code> adds <code>openai_base_url</code>, OpenRouter fields (<code>models</code>, <code>route</code>, <code>openrouter_base_url</code>, <code>site_url</code>, <code>app_name</code>), <code>store</code>, and a <code>response_callback</code>. Providers without a dedicated class (groq, together, litellm, gemini, xai, sarvam, langchain) use <code>BaseLlmConfig</code> directly. Full detail on the LLM layer is in <a href="llms.html">LLM providers</a>.</p>
+
+<h3>Embedder config — <code>mem0/configs/embeddings/</code></h3>
+<p>This directory contains only <code>base.py</code> (plus <code>__init__.py</code>): every embedder shares one <code>BaseEmbedderConfig</code> (an <code>ABC</code>). It is a "kitchen-sink" config — a single class with provider-tagged fields for all backends: <code>ollama_base_url</code>, <code>openai_base_url</code>, <code>model_kwargs</code>/<code>huggingface_base_url</code>, <code>azure_kwargs</code> (an <code>AzureConfig</code>), <code>vertex_credentials_json</code>, <code>output_dimensionality</code> (Gemini), <code>lmstudio_base_url</code>, and AWS Bedrock keys. It also exposes <code>memory_add_embedding_type</code> / <code>memory_update_embedding_type</code> / <code>memory_search_embedding_type</code> so different actions can request different embedding modes. See <a href="embeddings.html">embedding providers</a>.</p>
+<aside class="callout gotcha"><strong>Gotcha</strong> <code>BaseEmbedderConfig.__init__</code> sets <code>self.azure_kwargs = AzureConfig(**azure_kwargs) or {}</code>, with <code>azure_kwargs</code> defaulting to a mutable <code>{}</code>. So every embedder always gets an <code>AzureConfig</code> instance constructed (with all-<code>None</code> fields) even when Azure is not in use.</aside>
+
+<h3>Vector store configs — <code>mem0/configs/vector_stores/</code></h3>
+<p>24 provider config files, one per backend (e.g. <code>qdrant.py → QdrantConfig</code>, <code>pgvector.py → PGVectorConfig</code>, <code>pinecone.py → PineconeConfig</code>, …). Unlike LLM/embedder configs these are full Pydantic <code>BaseModel</code>s, frequently with their own validators. <code>QdrantConfig</code>, for instance, declares <code>collection_name</code> (default <code>"mem0"</code>), <code>embedding_model_dims</code> (1536), connection fields, and a strict <code>validate_extra_fields</code> validator that raises if you pass any key outside <code>model_fields</code>. The common runtime interface these back is documented under <a href="vector-stores.html#interface">vector stores</a>.</p>
+
+<h3>Reranker configs — <code>mem0/configs/rerankers/</code></h3>
+<p><code>BaseRerankerConfig</code> (Pydantic <code>BaseModel</code>) holds <code>provider</code>, <code>model</code>, <code>api_key</code>, <code>top_k</code>. Five provider subclasses add specifics: <code>cohere.py</code> (<code>CohereRerankerConfig</code>, default model <code>rerank-english-v3.0</code>, <code>return_documents</code>, <code>max_chunks_per_doc</code>), <code>sentence_transformer.py</code>, <code>zero_entropy.py</code>, <code>llm.py</code>, <code>huggingface.py</code>. Note these are distinct from the wrapper <code>RerankerConfig</code> in <code>config.py</code>. See <a href="rerankers.html">rerankers</a>.</p>
+</section>
+
+<section id="factories">
+<h2>The four factories</h2>
+<p>One-sentence summary: each factory in <code>mem0/utils/factory.py</code> owns a <code>provider_to_class</code> map and a <code>create()</code> classmethod that resolves the implementation via <code>load_class()</code> and feeds it a config.</p>
+
+<p><code>load_class(class_type)</code> is the shared mechanism: it splits a dotted path on the last <code>.</code>, <code>importlib.import_module</code>s the module, and <code>getattr</code>s the class. This is what keeps provider SDK imports lazy.</p>
+
+<pre class="mermaid">
+flowchart LR
+  A["MemoryConfig\n(validated)"] --> B["Memory.__init__"]
+  B --> C["EmbedderFactory.create\n(provider, config, vector_config)"]
+  B --> D["VectorStoreFactory.create\n(provider, config)"]
+  B --> E["LlmFactory.create\n(provider, config)"]
+  B --> F["RerankerFactory.create\n(provider, config)\nonly if reranker set"]
+  C --> G["load_class -> Embedder"]
+  D --> H["load_class -> VectorStore"]
+  E --> I["load_class -> LLM"]
+  F --> J["load_class -> Reranker"]
+</pre>
+
+<table>
+<thead><tr><th>Factory</th><th>Map value shape</th><th>Providers</th><th>How config becomes the instance</th></tr></thead>
+<tbody>
+<tr><td><code>LlmFactory</code></td><td><code>(class_path, config_class)</code> tuple</td><td>18</td><td>dict → <code>config_class(**config)</code>; <code>BaseLlmConfig</code> → field-by-field re-projection into the provider config; <code>None</code> → defaults from kwargs</td></tr>
+<tr><td><code>EmbedderFactory</code></td><td><code>class_path</code> string</td><td>11</td><td>always <code>BaseEmbedderConfig(**config)</code> then <code>instance(base_config)</code></td></tr>
+<tr><td><code>VectorStoreFactory</code></td><td><code>class_path</code> string</td><td>24</td><td><code>config.model_dump()</code> if not a dict, then <code>instance(**config)</code> (kwargs, not a config object)</td></tr>
+<tr><td><code>RerankerFactory</code></td><td><code>(class_path, config_class)</code> tuple</td><td>5</td><td>dict → <code>config_class(**config, **kwargs)</code>; must be a dict or <code>BaseRerankerConfig</code></td></tr>
+</tbody>
+</table>
+
+<h3>LlmFactory.create — the richest dispatch</h3>
+<p><code>LlmFactory.provider_to_class</code> maps each provider to a <em>tuple</em> of <code>(impl_path, config_class)</code>, e.g. <code>"openai" → ("mem0.llms.openai.OpenAILLM", OpenAIConfig)</code>, <code>"groq" → (..., BaseLlmConfig)</code>. <code>create(provider_name, config=None, **kwargs)</code>:</p>
+<ul>
+<li>Raises <code>ValueError("Unsupported Llm provider: ...")</code> for unknown providers.</li>
+<li><code>config is None</code> → <code>config_class(**kwargs)</code> (build from kwargs/defaults).</li>
+<li><code>config</code> is a <code>dict</code> → <code>config.update(kwargs); config = config_class(**config)</code>.</li>
+<li><code>config</code> is a <code>BaseLlmConfig</code> <em>and</em> the target <code>config_class</code> differs → it copies a fixed set of common attributes (<code>model</code>, <code>temperature</code>, <code>api_key</code>, <code>max_tokens</code>, <code>top_p</code>, <code>top_k</code>, <code>enable_vision</code>, <code>vision_details</code>, and notably <code>http_client_proxies=config.http_client</code>) into a dict and rebuilds it as the provider class. If the class is already <code>BaseLlmConfig</code>, the object is used as-is.</li>
+<li>Finally <code>return llm_class(config)</code>.</li>
+</ul>
+<aside class="callout gotcha"><strong>Gotcha</strong> When re-projecting a <code>BaseLlmConfig</code> into a provider class, only the fixed common-parameter list is carried over. <code>reasoning_effort</code> is <em>not</em> in that copy list even though <code>BaseLlmConfig</code> defines it — so passing a base config object (rather than a dict) can silently drop <code>reasoning_effort</code>. The dict path does not have this problem because it spreads the whole dict.</aside>
+<p><code>LlmFactory</code> also exposes <code>register_provider(name, class_path, config_class=None)</code> (defaulting to <code>BaseLlmConfig</code>) and <code>get_supported_providers()</code> — an extension point for third-party LLMs without touching the source map.</p>
+
+<h3>EmbedderFactory.create — vector-store-aware</h3>
+<p><code>create(provider_name, config, vector_config)</code> takes a third argument: the vector store's config. There is one special case at the top:</p>
+<pre><code class="language-python">if provider_name == "upstash_vector" and vector_config and vector_config.enable_embeddings:
+    return MockEmbeddings()</code></pre>
+<p>i.e. when Upstash Vector is doing the embedding itself, mem0 substitutes a no-op <code>MockEmbeddings</code> rather than calling a real embedder. Otherwise it does <code>BaseEmbedderConfig(**config)</code> and <code>instance(base_config)</code>. Unknown providers raise <code>ValueError("Unsupported Embedder provider: ...")</code>. The engine calls it as <code>EmbedderFactory.create(self.config.embedder.provider, self.config.embedder.config, self.config.vector_store.config)</code>.</p>
+
+<h3>VectorStoreFactory.create — kwargs, not config object</h3>
+<p>The vector store factory is the only one that passes <code>**config</code> as keyword arguments to the implementation constructor rather than handing it a config object. If <code>config</code> is not already a dict (it normally is a typed object after <code>VectorStoreConfig</code>'s post-validator), it calls <code>config.model_dump()</code> first. It also has a <code>reset(instance)</code> classmethod that calls <code>instance.reset()</code> — used when the engine recreates a collection.</p>
+
+<h3>RerankerFactory.create — strict typing</h3>
+<p>Like <code>LlmFactory</code> it uses <code>(class_path, config_class)</code> tuples. A <code>dict</code> config becomes <code>config_class(**config, **kwargs)</code>; a config that is neither dict nor <code>BaseRerankerConfig</code> raises <code>ValueError</code>. Class import failures are re-raised as <code>ImportError</code> with the provider name. Crucially the implementation paths point at <code>mem0.reranker.*</code> (singular), e.g. <code>"cohere" → "mem0.reranker.cohere_reranker.CohereReranker"</code>.</p>
+</section>
+
+<section id="dict-vs-object">
+<h2>Dict vs. object configuration</h2>
+<p>One-sentence summary: you can build a <code>MemoryConfig</code> from a nested dict via <code>Memory.from_config(dict)</code> or assemble typed objects directly — both produce the same validated tree.</p>
+
+<h3>Dict form (most common)</h3>
+<pre><code class="language-python">from mem0 import Memory
+
+config = {
+    "llm": {
+        "provider": "openai",
+        "config": {"model": "gpt-4o-mini", "temperature": 0.1, "max_tokens": 2000},
+    },
+    "embedder": {
+        "provider": "openai",
+        "config": {"model": "text-embedding-3-small"},
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {"collection_name": "mem0", "host": "localhost", "port": 6333},
+    },
+    "reranker": {                       # optional; omit to skip reranking
+        "provider": "cohere",
+        "config": {"model": "rerank-english-v3.0", "top_k": 5},
+    },
+    "history_db_path": "/data/mem0/history.db",
+    "version": "v1.1",
+    "custom_instructions": "Only remember durable user preferences.",
+}
+
+m = Memory.from_config(config)</code></pre>
+<p><code>Memory.from_config(config_dict)</code> (in <code>mem0/memory/main.py</code>) calls a pass-through <code>_process_config</code> then <code>MemoryConfig(**config_dict)</code>, catching <code>ValidationError</code> and re-raising after logging. The same exists for <code>AsyncMemory</code>. The dict keys are the wrapper fields; Pydantic recursively builds <code>LlmConfig</code>, <code>EmbedderConfig</code>, etc.</p>
+
+<h3>Equivalent object form</h3>
+<pre><code class="language-python">from mem0 import Memory
+from mem0.configs.base import MemoryConfig
+from mem0.llms.configs import LlmConfig
+from mem0.embeddings.configs import EmbedderConfig
+from mem0.vector_stores.configs import VectorStoreConfig
+
+config = MemoryConfig(
+    llm=LlmConfig(provider="openai",
+                  config={"model": "gpt-4o-mini", "temperature": 0.1}),
+    embedder=EmbedderConfig(provider="openai",
+                            config={"model": "text-embedding-3-small"}),
+    vector_store=VectorStoreConfig(provider="qdrant",
+                                   config={"collection_name": "mem0",
+                                           "host": "localhost", "port": 6333}),
+    custom_instructions="Only remember durable user preferences.",
+)
+
+m = Memory(config)</code></pre>
+<aside class="callout insight"><strong>Insight</strong> Note that even in "object form" the innermost <code>config=</code> stays a plain dict for LLM and embedder — those wrappers keep it as a dict. Only the vector store's inner config is upgraded to a typed object by its post-validator. So "fully typed config objects" is partly a fiction: the deepest LLM/embedder parameters are always dicts until factory time.</aside>
+
+<h3>Defaults: the zero-config path</h3>
+<pre><code class="language-python">from mem0 import Memory
+m = Memory()   # == Memory(MemoryConfig())</code></pre>
+<p>With no arguments the engine signature is <code>def __init__(self, config: MemoryConfig = MemoryConfig())</code>. Defaults resolve to: OpenAI LLM, OpenAI embedder, local Qdrant (<code>path="/tmp/qdrant"</code>, collection <code>"mem0"</code>, 1536-dim), no reranker, history at <code>~/.mem0/history.db</code>, version <code>v1.1</code>. Only <code>OPENAI_API_KEY</code> is required.</p>
+<aside class="callout gotcha"><strong>Gotcha</strong> <code>MemoryConfig()</code> is evaluated <em>once</em> as a default-argument value at function-definition time, but because each field uses <code>default_factory</code>/immutable defaults and the engine treats <code>self.config</code> as read-mostly, the usual mutable-default pitfall is largely avoided. Still, prefer passing an explicit config object when running multiple <code>Memory</code> instances with divergent settings.</aside>
+</section>
+
+<section id="validation">
+<h2>Pydantic v2 validation semantics</h2>
+<p>One-sentence summary: validation is layered — provider-name allow-lists at the wrapper level, full field validation at the factory/provider-config level.</p>
+<ul>
+<li><strong>Wrapper level</strong>: <code>LlmConfig</code>/<code>EmbedderConfig</code> use <code>@field_validator("config")</code> reading <code>values.data.get("provider")</code> (the Pydantic v2 way to access sibling fields). <code>VectorStoreConfig</code> uses <code>@model_validator(mode="after")</code> to import and build the typed config. <code>RerankerConfig</code> sets <code>model_config = {"extra": "forbid"}</code> so unknown top-level keys are rejected.</li>
+<li><strong>Provider-config level</strong>: vector-store config classes like <code>QdrantConfig</code> add their own <code>@model_validator(mode="before")</code> rules (connection-coordinate completeness, no-extra-fields). LLM/embedder base configs are plain <code>ABC</code>s — they do <em>not</em> validate via Pydantic; bad keys surface as <code>TypeError</code> from <code>__init__</code> at factory time.</li>
+<li><strong>Error surface</strong>: <code>Memory.from_config</code> catches <code>pydantic.ValidationError</code>, logs, and re-raises, so configuration mistakes fail fast at construction.</li>
+</ul>
+<aside class="callout perf"><strong>Performance</strong> Because provider SDK imports are deferred to <code>load_class()</code>, importing <code>mem0</code> and constructing a <code>MemoryConfig</code> is cheap regardless of how many backends are installed; you only pay the import cost for the providers you actually instantiate.</aside>
+<aside class="callout security"><strong>Security</strong> API keys flow through plain <code>config</code> dicts/objects. Provider configs accept <code>api_key</code> directly but every provider also falls back to environment variables when it is <code>None</code> (e.g. <code>OPENAI_API_KEY</code>, <code>AWS_REGION</code> for Bedrock embeddings). Prefer env vars over embedding keys in config dicts that may be logged or serialised — and note the engine builds a telemetry vector store whose config is deep-copied from yours.</aside>
+</section>
+
+<section id="enums">
+<h2>Enums</h2>
+<p>One-sentence summary: <code>mem0/configs/enums.py</code> defines a single small enum used for memory typing, not for provider selection.</p>
+<pre><code class="language-python">class MemoryType(Enum):
+    SEMANTIC   = "semantic_memory"
+    EPISODIC   = "episodic_memory"
+    PROCEDURAL = "procedural_memory"</code></pre>
+<p>Provider selection is done with plain strings (validated against the factory maps), <em>not</em> enums. <code>MemoryType</code> classifies stored memories and is consumed by <a href="memory-algorithm.html">the memory algorithm</a> rather than the configuration layer; it is documented here only because it lives under <code>mem0/configs/</code>.</p>
+</section>
+
+<section id="cross-cutting">
+<h2>How the engine consumes the config</h2>
+<p>One-sentence summary: <code>Memory.__init__</code> (and <code>AsyncMemory.__init__</code>) read <code>self.config</code> and call the factories in a fixed order, then derive a few cached attributes.</p>
+<ul>
+<li><code>self.embedding_model = EmbedderFactory.create(embedder.provider, embedder.config, vector_store.config)</code></li>
+<li><code>self.vector_store = VectorStoreFactory.create(vector_store.provider, vector_store.config)</code></li>
+<li><code>self.llm = LlmFactory.create(llm.provider, llm.config)</code></li>
+<li><code>self.db = SQLiteManager(config.history_db_path)</code></li>
+<li><code>self.collection_name = config.vector_store.config.collection_name</code> — relies on the vector-store config being a typed object with that attribute</li>
+<li><code>self.api_version = config.version</code>; <code>self.custom_instructions = config.custom_instructions</code></li>
+<li><code>self.reranker</code> only if <code>config.reranker</code> is set, else <code>None</code></li>
+<li>A telemetry-only vector store (collection <code>"mem0migrations"</code>) is built from a deep-copied config when <code>MEM0_TELEMETRY</code> is on; for <code>faiss</code>/<code>qdrant</code> it is pointed at a <code>migrations_{provider}</code> dir under <code>~/.mem0</code></li>
+<li>An <code>entity_store</code> (collection <code>{collection}_entities</code>) is built lazily on first use, sharing the Qdrant client where possible to avoid RocksDB lock contention</li>
+</ul>
+<p>Full setup/lifecycle detail is on <a href="memory-engine.html">the memory engine page</a>; the end-to-end request paths are on <a href="data-flow.html">data flow</a>. Cross-cutting config gotchas are aggregated on <a href="surprises.html">surprises &amp; gotchas</a>.</p>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li><a href="llms.html">LLM Providers</a></li><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="vector-stores.html">Vector Stores</a></li><li><a href="rerankers.html">Rerankers</a></li></ul></div><div><h4>Used by</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="client-sdk.html">Hosted Client &amp; Proxy</a></li><li><a href="data-flow.html">Data Flow</a></li><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="graph-memory.html">Graph Memory (deprecated)</a></li><li><a href="integrations.html">Integrations &amp; Ecosystem</a></li><li><a href="llms.html">LLM Providers</a></li><li><a href="memory-algorithm.html">Memory Algorithm</a></li><li><a href="memory-engine.html">Memory Engine</a></li><li><a href="openmemory.html">OpenMemory Platform</a></li><li><a href="rerankers.html">Rerankers</a></li><li><a href="server.html">Self-Hosted Server</a></li><li><a href="typescript-sdk.html">TypeScript SDK</a></li><li><a href="vector-stores.html">Vector Stores</a></li></ul></div><div><h4>Related</h4><ul><li><a href="glossary.html">Glossary &amp; Concept Index</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li></ul></div><div><h4>Source files</h4><ul><li><code>mem0/configs/base.py</code> — Root Pydantic model: vector_store, llm, embedder, reranker, history_db_path, version, custom_instructions; also AzureConfig and MemoryItem</li><li><code>mem0/configs/enums.py</code> — Single enum (SEMANTIC/EPISODIC/PROCEDURAL); not used for provider selection</li><li><code>mem0/utils/factory.py</code> — The four factories + provider_to_class maps (18/11/24/5 providers) and lazy importlib dispatch</li><li><code>mem0/llms/configs.py</code> — {provider, config} wrapper, default openai, field_validator allow-list of 18 providers</li><li><code>mem0/embeddings/configs.py</code> — {provider, config} wrapper, default openai, allow-list of 11 providers</li><li><code>mem0/vector_stores/configs.py</code> — default qdrant; model_validator(after) imports+instantiates typed provider config, injects /tmp/{provider} path</li><li><code>mem0/configs/llms/base.py</code> — ABC with common LLM params; 9 dedicated subclasses (anthropic, aws_bedrock, azure, deepseek, lmstudio, minimax, ollama, openai, vllm)</li><li><code>mem0/configs/embeddings/base.py</code> — Single kitchen-sink ABC for all embedders; no per-provider config files</li><li><code>mem0/configs/rerankers/config.py</code> — Wrapper with model_config extra=forbid; distinct from per-provider BaseRerankerConfig subclasses</li><li><code>mem0/configs/vector_stores/qdrant.py</code> — Example typed provider config with validate_extra_fields and host/port/path/url validation</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The reranker layer is an optional, opt-in second-stage scorer that re-orders candidate memories returned by mem0&#x27;s multi-signal retrieval before they are returned to the caller. Every provider subclasses BaseReranker and implements a single rerank(query, documents, top_k) method that attaches a rerank_score and returns documents sorted descending. Five providers ship (cohere, sentence_transformer, huggingface, llm_reranker, zero_entropy) spanning hosted APIs, local cross-encoders, and LLM-as-judge. Reranking runs only when a reranker is configured in MemoryConfig.reranker AND the caller passes rerank=True to search().">
+<meta name="generator" content="mem0-wiki-build">
+<title>Rerankers · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Rerankers", "description": "The reranker layer is an optional, opt-in second-stage scorer that re-orders candidate memories returned by mem0's multi-signal retrieval before they are returned to the caller. Every provider subclasses BaseReranker and implements a single rerank(query, documents, top_k) method that attaches a rerank_score and returns documents sorted descending. Five providers ship (cohere, sentence_transformer, huggingface, llm_reranker, zero_entropy) spanning hosted APIs, local cross-encoders, and LLM-as-judge. Reranking runs only when a reranker is configured in MemoryConfig.reranker AND the caller passes rerank=True to search().", "keywords": "reranker, rerank, rerank_score, BaseReranker, RerankerFactory, CohereReranker, SentenceTransformerReranker, HuggingFaceReranker, LLMReranker, ZeroEntropyReranker, cross-encoder, cohere rerank", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html">Vector Stores</a><a href="rerankers.html" class="active">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Providers</span><span class="sep">/</span><span>Rerankers</span></nav>
+    <h1>Rerankers</h1>
+<p class="lead">The reranker layer is an <em>optional, opt-in</em> second-stage scorer that re-orders the candidate memories returned by mem0's retrieval pipeline before they are handed back to the caller. Every provider implements one method, <code>rerank(query, documents, top_k)</code>, which attaches a <code>rerank_score</code> to each document and returns them in descending relevance order. Five concrete providers ship in <code>mem0/reranker/</code> &mdash; <code>cohere</code>, <code>sentence_transformer</code>, <code>huggingface</code>, <code>llm_reranker</code>, and <code>zero_entropy</code> &mdash; spanning hosted APIs, local cross-encoders, and LLM-as-judge scoring. Reranking is disabled by default and only runs when both a reranker is configured <em>and</em> the caller passes <code>rerank=True</code> to <code>search()</code>.</p>
+
+<section id="overview">
+<h2>Where reranking sits in retrieval</h2>
+<p>Reranking is the last optional step of <code>search()</code>. It consumes the already-scored, already-truncated candidate list produced by the multi-signal retrieval stage and re-orders it.</p>
+<ul>
+<li><strong>Stage 1 &mdash; multi-signal retrieval.</strong> <code>Memory._search_vector_store</code> in <code>mem0/memory/main.py</code> runs semantic (vector) search, optional BM25 keyword search, and entity boosts, then fuses them via <code>score_and_rank</code>. See <a href="memory-algorithm.html#multi-signal-retrieval">the memory algorithm</a> for the fusion math.</li>
+<li><strong>Stage 2 &mdash; formatting.</strong> Each surviving candidate becomes a <code>MemoryItem</code> dict with a <code>memory</code> text field, an <code>id</code>, a fused <code>score</code>, timestamps, and promoted metadata keys.</li>
+<li><strong>Stage 3 &mdash; reranking (optional).</strong> If <code>rerank=True</code> and <code>self.reranker</code> is set, the formatted list is passed to <code>self.reranker.rerank(query, original_memories, limit)</code>. The reranked list <em>replaces</em> the original and is returned under <code>{"results": [...]}</code>.</li>
+</ul>
+<aside class="callout insight"><strong>Insight</strong> The reranker never touches the vector store or embeddings. It receives the <em>already-materialised</em> memory dicts (with full text in the <code>memory</code> field) and only re-orders them. This makes the layer completely orthogonal to which <a href="vector-stores.html">vector store</a> or <a href="embeddings.html">embedder</a> you use.</aside>
+
+<pre class="mermaid">
+flowchart LR
+  Q[query] --> VS[Stage 1: semantic + BM25 + entity boost<br/>score_and_rank fusion]
+  VS --> FMT[Stage 2: format -> MemoryItem dicts]
+  FMT --> RR{rerank=True<br/>and reranker set?}
+  RR -- no --> OUT[results]
+  RR -- yes --> RK[Stage 3: reranker.rerank<br/>adds rerank_score, re-sorts]
+  RK --> OUT
+</pre>
+
+<details>
+<summary>Deep dive: the exact invocation in <code>search()</code></summary>
+<p>In the synchronous <code>Memory.search</code> (<code>mem0/memory/main.py</code>):</p>
+<pre><code class="language-python">original_memories = self._search_vector_store(query, effective_filters, limit, threshold)
+
+# Apply reranking if enabled and reranker is available
+if rerank and self.reranker and original_memories:
+    try:
+        reranked_memories = self.reranker.rerank(query, original_memories, limit)
+        original_memories = reranked_memories
+    except Exception as e:
+        logger.warning(f"Reranking failed, using original results: {e}")
+
+return {"results": original_memories}</code></pre>
+<p>The async <code>AsyncMemory.search</code> is identical except the call is offloaded with <code>await asyncio.to_thread(self.reranker.rerank, query, original_memories, limit)</code> &mdash; the providers are synchronous (some are CPU/GPU-bound, some make blocking HTTP calls), so they are run in a thread to avoid blocking the event loop. See <a href="memory-engine.html#sync-vs-async">the memory engine</a> for the sync/async split.</p>
+</details>
+
+<aside class="callout gotcha"><strong>Gotcha</strong> There are <em>two</em> guards. Configuring a reranker is not enough &mdash; if the caller does not pass <code>rerank=True</code>, the reranker is silently skipped. Conversely, passing <code>rerank=True</code> with no configured reranker is a no-op (the <code>self.reranker</code> check fails). Reranking also short-circuits on an empty result set (<code>and original_memories</code>).</aside>
+</section>
+
+<section id="base-contract">
+<h2>The base contract: <code>BaseReranker</code></h2>
+<p>All providers subclass the abstract <code>BaseReranker</code> in <code>mem0/reranker/base.py</code>, which declares exactly one abstract method.</p>
+<pre><code class="language-python">class BaseReranker(ABC):
+    @abstractmethod
+    def rerank(self, query: str,
+               documents: List[Dict[str, Any]],
+               top_k: int = None) -> List[Dict[str, Any]]:
+        """Rerank documents based on relevance to the query.
+        documents: each with a 'memory' field
+        Returns: reranked documents with an added 'rerank_score' field"""</code></pre>
+<dl>
+<dt><code>query</code></dt><dd>The raw search string. Passed through unchanged from <code>search(query=...)</code>.</dd>
+<dt><code>documents</code></dt><dd>The list of memory dicts from stage 2. Providers extract scorable text by probing <code>memory</code>, then <code>text</code>, then <code>content</code>, falling back to <code>str(doc)</code>. In practice mem0 always supplies <code>memory</code>.</dd>
+<dt><code>top_k</code></dt><dd>How many documents to keep. <code>search()</code> always passes the request's <code>limit</code> (the <code>top_k</code> argument of <code>search</code>, default 20). Each provider falls back to <code>config.top_k</code> if the argument is <code>None</code>.</dd>
+<dt>Return value</dt><dd>A re-ordered (descending) list of <em>copies</em> of the input dicts, each with a new float <code>rerank_score</code> key.</dd>
+</dl>
+<aside class="callout decision"><strong>Design decision: <code>rerank_score</code> is additive, not replacing.</strong> Providers do a <code>doc.copy()</code> and set <code>rerank_score</code> without removing the original fused <code>score</code> from stage 1. Downstream consumers therefore see <em>both</em> the retrieval score and the rerank score; the ordering of the returned list reflects <code>rerank_score</code>.</aside>
+<aside class="callout gotcha"><strong>Gotcha &mdash; score scales are not comparable across providers.</strong> The <code>rerank_score</code> means different things per provider: Cohere/ZeroEntropy return an API-defined relevance score, the LLM reranker returns a 0.0&ndash;1.0 judged score, SentenceTransformer returns raw cross-encoder logits (unbounded), and HuggingFace optionally min&ndash;max normalises to [0,1]. Do not assume a common scale.</aside>
+</section>
+
+<section id="resilience">
+<h2>Shared resilience pattern: graceful fallback</h2>
+<p>Every provider wraps its scoring call in <code>try/except Exception</code> and, on <em>any</em> failure, falls back to the original order with <code>rerank_score = 0.0</code> rather than raising.</p>
+<pre><code class="language-python"># Pattern shared by cohere / sentence_transformer / huggingface / zero_entropy
+except Exception:
+    for doc in documents:
+        doc['rerank_score'] = 0.0
+    return documents[:top_k] if top_k else documents</code></pre>
+<ul>
+<li>The <code>LLMReranker</code> is finer-grained: it catches per-document scoring errors and assigns a neutral <code>0.5</code> to the failing document, so one bad call does not blank the whole list.</li>
+<li>This provider-level fallback is <em>in addition</em> to the <code>try/except</code> in <code>search()</code> itself, which logs a warning and reverts to the unreranked results if <code>rerank()</code> raises entirely.</li>
+</ul>
+<aside class="callout perf"><strong>Performance / correctness note</strong> The bare-except fallbacks mean reranking failures are <em>silent</em> at the provider level (no log) and produce uniform <code>0.0</code> scores. If you see every result carrying <code>rerank_score == 0.0</code>, reranking failed and you are looking at the original retrieval order, not a relevance ordering. The two non-fallback providers that <em>do</em> sort even in the happy path differ in whether they re-sort the API response (see ZeroEntropy below).</aside>
+</section>
+
+<section id="providers">
+<h2>Providers</h2>
+<p>Five concrete rerankers live in <code>mem0/reranker/</code>. Each lazily imports its heavy/optional dependency at module load and raises a helpful <code>ImportError</code> only when instantiated without the package installed.</p>
+
+<h3 id="cohere">Cohere &mdash; <code>CohereReranker</code></h3>
+<p>Hosted reranking via Cohere's rerank API. File: <code>mem0/reranker/cohere_reranker.py</code>; config: <code>CohereRerankerConfig</code>.</p>
+<ul>
+<li><strong>Dependency:</strong> <code>cohere</code> (pip <code>cohere</code>). Guarded by <code>COHERE_AVAILABLE</code>.</li>
+<li><strong>Default model:</strong> <code>rerank-english-v3.0</code>.</li>
+<li><strong>Auth:</strong> <code>config.api_key</code> or the <code>COHERE_API_KEY</code> env var; raises <code>ValueError</code> if neither is set.</li>
+<li><strong>API call:</strong> <code>client.rerank(model, query, documents=doc_texts, top_n=top_k or config.top_k or len(documents), return_documents=..., max_chunks_per_doc=...)</code>. The API returns results already sorted by relevance; the provider maps <code>result.index</code> back to the original dict and copies <code>result.relevance_score</code> into <code>rerank_score</code>. No client-side re-sort needed.</li>
+<li><strong>Extra config knobs:</strong> <code>return_documents</code> (default <code>False</code>), <code>max_chunks_per_doc</code> (default <code>None</code>).</li>
+</ul>
+
+<h3 id="sentence-transformer">SentenceTransformer &mdash; <code>SentenceTransformerReranker</code></h3>
+<p>Local cross-encoder reranking via sentence-transformers. File: <code>mem0/reranker/sentence_transformer_reranker.py</code>; config: <code>SentenceTransformerRerankerConfig</code>.</p>
+<ul>
+<li><strong>Dependency:</strong> <code>sentence-transformers</code> (imports <code>CrossEncoder</code>). Guarded by <code>SENTENCE_TRANSFORMERS_AVAILABLE</code>.</li>
+<li><strong>Default model:</strong> <code>cross-encoder/ms-marco-MiniLM-L-6-v2</code>.</li>
+<li><strong>Scoring:</strong> builds <code>[query, doc_text]</code> pairs, calls <code>model.predict(pairs, batch_size, show_progress_bar)</code>, then sorts descending by raw score (numpy arrays are converted with <code>.tolist()</code>). Scores are <strong>not</strong> normalised &mdash; they are raw cross-encoder outputs.</li>
+<li><strong>Config knobs:</strong> <code>device</code> (auto via CrossEncoder if <code>None</code>), <code>batch_size</code> (32), <code>show_progress_bar</code> (False).</li>
+<li><strong>Exported by package:</strong> yes &mdash; one of only two names re-exported from <code>mem0/reranker/__init__.py</code>.</li>
+</ul>
+
+<h3 id="huggingface">HuggingFace &mdash; <code>HuggingFaceReranker</code></h3>
+<p>Local cross-encoder reranking driven directly through Transformers + Torch. File: <code>mem0/reranker/huggingface_reranker.py</code>; config: <code>HuggingFaceRerankerConfig</code>.</p>
+<ul>
+<li><strong>Dependency:</strong> <code>transformers</code> + <code>torch</code> (imports <code>AutoTokenizer</code>, <code>AutoModelForSequenceClassification</code>). Guarded by <code>TRANSFORMERS_AVAILABLE</code>.</li>
+<li><strong>Default model:</strong> <code>BAAI/bge-reranker-base</code>.</li>
+<li><strong>Device:</strong> auto-detects <code>cuda</code> vs <code>cpu</code> via <code>torch.cuda.is_available()</code> when <code>config.device is None</code>; model is moved to device and put in <code>.eval()</code> mode at init.</li>
+<li><strong>Scoring:</strong> batches <code>[query, doc]</code> pairs, tokenises with <code>padding/truncation</code> and <code>max_length</code>, runs the model under <code>torch.no_grad()</code>, squeezes logits to scores. Handles the single-item (0-dim tensor) edge case explicitly.</li>
+<li><strong>Normalisation:</strong> if <code>config.normalize</code> (default <code>True</code>), applies min&ndash;max scaling <code>(s - min)/(max - min + 1e-8)</code> to map scores into [0,1].</li>
+<li><strong>Config knobs:</strong> <code>device</code>, <code>batch_size</code> (32), <code>max_length</code> (512), <code>normalize</code> (True).</li>
+</ul>
+<aside class="callout insight"><strong>Insight &mdash; HuggingFace vs SentenceTransformer overlap.</strong> Both are local cross-encoders. SentenceTransformer wraps the higher-level <code>CrossEncoder</code> abstraction (handles tokenisation/batching internally), while HuggingFace drives the raw Transformers model and adds explicit batching, min&ndash;max normalisation, and device handling. Choose HuggingFace for finer control / normalised [0,1] scores; SentenceTransformer for the simpler, well-trodden path.</aside>
+
+<h3 id="llm-reranker">LLM-as-judge &mdash; <code>LLMReranker</code></h3>
+<p>Uses an LLM to score each document's relevance on a 0.0&ndash;1.0 scale. File: <code>mem0/reranker/llm_reranker.py</code>; config: <code>LLMRerankerConfig</code>; provider key is <code>llm_reranker</code>.</p>
+<ul>
+<li><strong>Dependency:</strong> none extra &mdash; reuses the existing <a href="llms.html">LLM provider layer</a> via <code>LlmFactory.create(...)</code> from <code>mem0/utils/factory.py</code>.</li>
+<li><strong>Default model / provider:</strong> <code>gpt-4o-mini</code> on <code>openai</code>, <code>temperature=0.0</code> (deterministic), <code>max_tokens=100</code>.</li>
+<li><strong>Nested LLM config:</strong> supports a <code>llm</code> dict with <code>provider</code>/<code>config</code> keys so non-OpenAI backends (e.g. Ollama needing <code>ollama_base_url</code>) can be configured; it overrides the top-level <code>provider</code>/<code>model</code>/<code>api_key</code> when present.</li>
+<li><strong>Prompt:</strong> a fixed <code>_SYSTEM_PROMPT</code> instructs the model to return a single number 0.0&ndash;1.0 with a banded rubric (1.0 = perfectly relevant ... 0.0&ndash;0.3 = not relevant). The query and document are sent as a separate <em>user</em> message.</li>
+<li><strong>Score extraction:</strong> <code>_extract_score</code> regex-matches the first <code>[01](?:\.\d+)?</code> token, clamps to [0,1], and defaults to <code>0.5</code> if no number is found.</li>
+<li><strong>Sorting:</strong> scores every document (one LLM call each), sorts descending, then truncates to <code>top_k</code> (arg) or <code>config.top_k</code>.</li>
+</ul>
+<aside class="callout security"><strong>Security &mdash; prompt-injection hardening.</strong> The reranker truncates both query and document to <code>_MAX_INPUT_LEN = 4000</code> chars and sends instructions in the <em>system</em> role with user data in the <em>user</em> role, so memory text cannot override the scoring instructions. This was a deliberate change from an earlier single-prompt design.</aside>
+<aside class="callout perf"><strong>Performance &mdash; N LLM calls per search.</strong> <code>LLMReranker</code> makes one synchronous LLM call <em>per candidate document</em>. With the default over-fetch this can be dozens of round-trips, making it by far the slowest and most expensive provider. It is best reserved for small candidate pools or offline/eval use (see <a href="evaluation.html">evaluation</a>).</aside>
+<aside class="callout gotcha"><strong>Deprecation</strong> <code>LLMRerankerConfig.scoring_prompt</code> is deprecated. If supplied it is used as the system message but emits a <code>DeprecationWarning</code> ("will be removed in a future version. The prompt is now used as the system message."). Prefer the built-in rubric.</aside>
+
+<h3 id="zero-entropy">ZeroEntropy &mdash; <code>ZeroEntropyReranker</code></h3>
+<p>Hosted reranking via the ZeroEntropy API. File: <code>mem0/reranker/zero_entropy_reranker.py</code>; config: <code>ZeroEntropyRerankerConfig</code>; provider key <code>zero_entropy</code>.</p>
+<ul>
+<li><strong>Dependency:</strong> <code>zeroentropy</code> (imports <code>ZeroEntropy</code> client). Guarded by <code>ZERO_ENTROPY_AVAILABLE</code>.</li>
+<li><strong>Default model:</strong> <code>zerank-1</code> (config also documents <code>zerank-1-small</code>).</li>
+<li><strong>Auth:</strong> <code>config.api_key</code> or <code>ZERO_ENTROPY_API_KEY</code> env var; raises <code>ValueError</code> if neither is present.</li>
+<li><strong>API call:</strong> <code>client.models.rerank(model, query, documents=doc_texts)</code>. Maps <code>result.index</code> back to the source dict, copies <code>result.relevance_score</code>, then <em>explicitly re-sorts</em> descending client-side and applies <code>top_k</code> &mdash; unlike the Cohere provider, which trusts the API's order and <code>top_n</code>.</li>
+</ul>
+</section>
+
+<section id="comparison">
+<h2>Provider comparison</h2>
+<table>
+<thead>
+<tr><th>Provider key</th><th>Class</th><th>Dependency</th><th>Default model</th><th>Locality</th><th>Auth</th><th>Score scale</th><th>Extra knobs</th></tr>
+</thead>
+<tbody>
+<tr>
+<td><code>cohere</code></td><td><code>CohereReranker</code></td><td><code>cohere</code></td><td><code>rerank-english-v3.0</code></td><td>Hosted API</td><td><code>COHERE_API_KEY</code></td><td>API relevance</td><td><code>return_documents</code>, <code>max_chunks_per_doc</code></td>
+</tr>
+<tr>
+<td><code>sentence_transformer</code></td><td><code>SentenceTransformerReranker</code></td><td><code>sentence-transformers</code></td><td><code>cross-encoder/ms-marco-MiniLM-L-6-v2</code></td><td>Local cross-encoder</td><td>none</td><td>Raw logits (unbounded)</td><td><code>device</code>, <code>batch_size</code>, <code>show_progress_bar</code></td>
+</tr>
+<tr>
+<td><code>huggingface</code></td><td><code>HuggingFaceReranker</code></td><td><code>transformers</code> + <code>torch</code></td><td><code>BAAI/bge-reranker-base</code></td><td>Local cross-encoder</td><td>none</td><td>[0,1] if <code>normalize</code></td><td><code>device</code>, <code>batch_size</code>, <code>max_length</code>, <code>normalize</code></td>
+</tr>
+<tr>
+<td><code>llm_reranker</code></td><td><code>LLMReranker</code></td><td>none (reuses LLM layer)</td><td><code>gpt-4o-mini</code> (openai)</td><td>LLM API / local LLM</td><td>per LLM provider</td><td>0.0&ndash;1.0 judged</td><td><code>temperature</code>, <code>max_tokens</code>, <code>llm</code> nested config</td>
+</tr>
+<tr>
+<td><code>zero_entropy</code></td><td><code>ZeroEntropyReranker</code></td><td><code>zeroentropy</code></td><td><code>zerank-1</code></td><td>Hosted API</td><td><code>ZERO_ENTROPY_API_KEY</code></td><td>API relevance</td><td>(top_k only)</td></tr>
+</tbody>
+</table>
+<aside class="callout gotcha"><strong>Provider key vs filename mismatch.</strong> The factory key for the LLM reranker is <code>llm_reranker</code> (not <code>llm</code>), and for the cross-encoder it is <code>sentence_transformer</code> (singular, no trailing <code>s</code>). Using the wrong key raises <code>ValueError: Unsupported reranker provider: ...</code>.</aside>
+<aside class="callout insight"><strong>Package export vs registry.</strong> <code>mem0/reranker/__init__.py</code> only re-exports <code>BaseReranker</code>, <code>CohereReranker</code>, and <code>SentenceTransformerReranker</code>. The other three providers are <em>not</em> in <code>__all__</code> but are still fully usable &mdash; the <code>RerankerFactory</code> imports them lazily by dotted path, so the package <code>__all__</code> is incomplete, not authoritative. Always count the <code>*_reranker.py</code> files (five) for the true provider set.</aside>
+</section>
+
+<section id="configuration">
+<h2>Configuration</h2>
+<p>Reranking is wired through the same provider-config pattern as the rest of mem0 (see <a href="config-system.html">the configuration system</a>).</p>
+
+<h3 id="config-shape">Config shape</h3>
+<ul>
+<li><code>MemoryConfig.reranker</code> (in <code>mem0/configs/base.py</code>) is an <code>Optional[RerankerConfig]</code> defaulting to <code>None</code> &mdash; so reranking is off unless explicitly configured.</li>
+<li><code>RerankerConfig</code> (<code>mem0/configs/rerankers/config.py</code>) has just two fields: <code>provider</code> (default <code>"cohere"</code>) and <code>config</code> (a provider-specific dict). It sets <code>model_config = {"extra": "forbid"}</code>, so unknown top-level keys are rejected.</li>
+<li>Each provider has its own Pydantic config subclassing <code>BaseRerankerConfig</code> (<code>mem0/configs/rerankers/base.py</code>), which defines the common fields <code>provider</code>, <code>model</code>, <code>api_key</code>, <code>top_k</code>.</li>
+</ul>
+
+<h3 id="factory">The factory</h3>
+<p><code>RerankerFactory</code> in <code>mem0/utils/factory.py</code> is the fourth-and-a-bit factory in the codebase (alongside LLM, embedder, vector-store factories). Its <code>provider_to_class</code> registry maps each key to a <code>(dotted_class_path, config_class)</code> tuple:</p>
+<pre><code class="language-python">provider_to_class = {
+    "cohere":               ("mem0.reranker.cohere_reranker.CohereReranker", CohereRerankerConfig),
+    "sentence_transformer": ("mem0.reranker.sentence_transformer_reranker.SentenceTransformerReranker", SentenceTransformerRerankerConfig),
+    "zero_entropy":         ("mem0.reranker.zero_entropy_reranker.ZeroEntropyReranker", ZeroEntropyRerankerConfig),
+    "llm_reranker":         ("mem0.reranker.llm_reranker.LLMReranker", LLMRerankerConfig),
+    "huggingface":          ("mem0.reranker.huggingface_reranker.HuggingFaceReranker", HuggingFaceRerankerConfig),
+}</code></pre>
+<p><code>RerankerFactory.create(provider_name, config)</code> validates the provider key, coerces a dict into the right config class (forwarding extra <code>**kwargs</code>), lazily imports the class with <code>load_class</code>, and instantiates it. An unknown key raises <code>ValueError</code>; a failed import (missing optional dependency) raises <code>ImportError</code>. The <code>Memory</code> constructor calls it once at init time: <code>RerankerFactory.create(config.reranker.provider, config.reranker.config)</code>.</p>
+
+<h3 id="example">Example configurations</h3>
+<pre><code class="language-python">from mem0 import Memory
+
+# Local cross-encoder, no API key needed
+m = Memory.from_config({
+    "reranker": {
+        "provider": "sentence_transformer",
+        "config": {"model": "cross-encoder/ms-marco-MiniLM-L-6-v2", "top_k": 10},
+    }
+})
+
+# Must still opt in per call:
+m.search("dietary preferences", filters={"user_id": "alice"}, top_k=10, rerank=True)</code></pre>
+<pre><code class="language-python"># Hosted Cohere reranker
+{"reranker": {"provider": "cohere",
+              "config": {"model": "rerank-english-v3.0", "api_key": "..."}}}
+
+# LLM-as-judge over a local Ollama model via nested llm config
+{"reranker": {"provider": "llm_reranker",
+              "config": {"llm": {"provider": "ollama",
+                                 "config": {"model": "llama3", "ollama_base_url": "http://localhost:11434"}}}}}</code></pre>
+<aside class="callout decision"><strong>Default provider quirk.</strong> <code>RerankerConfig.provider</code> defaults to <code>"cohere"</code>, but this default only applies if you supply a <code>reranker</code> block <em>without</em> a provider. Omitting the <code>reranker</code> block entirely leaves <code>MemoryConfig.reranker = None</code> and no reranker is created.</aside>
+</section>
+
+<section id="document-shape">
+<h2>Document shape and text extraction</h2>
+<p>The documents handed to <code>rerank()</code> are the <code>MemoryItem</code> dicts built in <code>_search_vector_store</code>. Their text lives in the <code>memory</code> key:</p>
+<pre><code class="language-json">{
+  "id": "…",
+  "memory": "User is allergic to peanuts",
+  "hash": "…",
+  "created_at": "…",
+  "updated_at": "…",
+  "score": 0.82,
+  "user_id": "alice",
+  "metadata": { /* non-core payload keys */ }
+}</code></pre>
+<p>Every provider uses the same defensive text-extraction ladder: <code>memory</code> &rarr; <code>text</code> &rarr; <code>content</code> &rarr; <code>str(doc)</code>. Only <code>memory</code> is ever produced by mem0's own pipeline; the other branches make the rerankers reusable with foreign document shapes.</p>
+</section>
+
+<section id="hosted-client">
+<h2>Reranking on the hosted client</h2>
+<p>The <a href="client-sdk.html">hosted MemoryClient</a> also exposes a <code>rerank</code> flag: <code>SearchOptions.rerank: Optional[bool]</code> in <code>mem0/client/types.py</code> and the documented <code>rerank</code> kwarg on <code>MemoryClient.search</code> / <code>AsyncMemoryClient.search</code> (<code>mem0/client/main.py</code>). On the hosted path the flag is forwarded to the platform API; the OSS reranker classes in this layer run only inside the self-hosted <a href="memory-engine.html">Memory engine</a>.</p>
+</section>
+
+<section id="extending">
+<h2>Adding a new reranker</h2>
+<ol>
+<li>Create <code>mem0/reranker/&lt;name&gt;_reranker.py</code> with a class subclassing <code>BaseReranker</code> and implementing <code>rerank(self, query, documents, top_k=None)</code>; guard any optional import and add the graceful-fallback <code>except</code>.</li>
+<li>Create <code>mem0/configs/rerankers/&lt;name&gt;.py</code> with a config subclassing <code>BaseRerankerConfig</code> for provider-specific fields.</li>
+<li>Register the <code>(dotted_path, ConfigClass)</code> tuple in <code>RerankerFactory.provider_to_class</code> and import the config in <code>mem0/utils/factory.py</code>.</li>
+<li>(Optional) re-export the class from <code>mem0/reranker/__init__.py</code> for direct import.</li>
+</ol>
+<p>This is the same provider-plugin pattern used throughout the codebase &mdash; see the <a href="architecture.html#provider-plugin-pattern">architecture overview</a>.</p>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li><a href="llms.html">LLM Providers</a></li><li><a href="config-system.html">Configuration System</a></li></ul></div><div><h4>Used by</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="client-sdk.html">Hosted Client &amp; Proxy</a></li><li><a href="config-system.html">Configuration System</a></li><li><a href="data-flow.html">Data Flow</a></li><li><a href="memory-algorithm.html">Memory Algorithm</a></li><li><a href="memory-engine.html">Memory Engine</a></li></ul></div><div><h4>Related</h4><ul><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="evaluation.html">Evaluation &amp; Benchmarks</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li><li><a href="typescript-sdk.html">TypeScript SDK</a></li><li><a href="vector-stores.html">Vector Stores</a></li></ul></div><div><h4>Source files</h4><ul><li><code>mem0/reranker/base.py</code> — Abstract base: single rerank(query, documents, top_k) method; contract that documents carry a &#x27;memory&#x27; field and results gain a &#x27;rerank_score&#x27;.</li><li><code>mem0/reranker/cohere_reranker.py</code> — Hosted Cohere rerank API; default rerank-english-v3.0; COHERE_API_KEY; trusts API ordering.</li><li><code>mem0/reranker/sentence_transformer_reranker.py</code> — Local CrossEncoder; default cross-encoder/ms-marco-MiniLM-L-6-v2; raw logits, no normalisation.</li><li><code>mem0/reranker/huggingface_reranker.py</code> — Transformers+Torch cross-encoder; default BAAI/bge-reranker-base; batching, device auto-detect, optional min-max normalisation.</li><li><code>mem0/reranker/llm_reranker.py</code> — LLM-as-judge 0-1 scoring via LlmFactory; system/user prompt split, 4000-char truncation, deprecated scoring_prompt, nested llm config.</li><li><code>mem0/reranker/zero_entropy_reranker.py</code> — Hosted ZeroEntropy rerank API; default zerank-1; ZERO_ENTROPY_API_KEY; re-sorts client-side.</li><li><code>mem0/utils/factory.py</code> — provider_to_class registry (5 keys) mapping provider -&gt; (dotted class path, config class); create() lazily imports class.</li><li><code>mem0/configs/rerankers/config.py</code> — MemoryConfig.reranker shape: provider (default &#x27;cohere&#x27;) + config dict; extra=forbid.</li><li><code>mem0/configs/rerankers/base.py</code> — Common config fields: provider, model, api_key, top_k; base for all provider configs.</li><li><code>mem0/memory/main.py</code> — Where rerank is invoked: after _search_vector_store fusion, gated by rerank=True and self.reranker; async path uses asyncio.to_thread.</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>

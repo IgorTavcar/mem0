@@ -1,0 +1,215 @@
+<h1>Evaluation &amp; Benchmarks</h1>
+<p class="lead">mem0 ships an open, reproducible benchmarking harness under <code>evaluation/</code> that pits the mem0 memory layer against RAG, full-context, LangMem, Zep and OpenAI baselines on conversational long-term-memory datasets. The harness has two clean phases — a per-technique <em>experiment runner</em> that produces answer JSON, and a <em>scorer</em> that applies BLEU, token-F1, and an LLM-as-judge. The headline April-2026 numbers (LoCoMo 91.6, LongMemEval 94.8, BEAM 64.1 / 48.6) come from a separate, larger open-sourced harness (<code>mem0ai/memory-benchmarks</code>) and reflect single-pass retrieval — one call, no agentic loops.</p>
+
+<section id="overview">
+<h2>Overview &amp; what is measured</h2>
+<p>Two distinct things live under the "benchmarks" umbrella, and conflating them is the single biggest source of confusion.</p>
+<dl>
+  <dt>The in-repo LoCoMo harness (<code>evaluation/</code>)</dt>
+  <dd>The code described on this page. It targets the <strong>LoCoMo</strong> dataset only, drives the <em>hosted</em> mem0 platform via <code>MemoryClient</code> plus a set of literature/commercial baselines, and scores with BLEU / token-F1 / a GPT-4o-mini judge. This is the artifact behind the original arXiv paper (<code>2504.19413</code>).</dd>
+  <dt>The headline table (README &rarr; <code>mem0ai/memory-benchmarks</code>)</dt>
+  <dd>A larger, separately open-sourced framework that produces the April-2026 numbers across <strong>LoCoMo, LongMemEval, and BEAM</strong> (at 1M and 10M token scales). The repo README links it explicitly as the way "anyone can reproduce the numbers." Those datasets/runners are <em>not</em> vendored into this tree — only the LoCoMo harness is.</dd>
+</dl>
+<aside class="callout decision"><strong>Decision: single-pass, no agentic loops.</strong> The README states all headline benchmarks run "single-pass retrieval (one call, no agentic loops)." This is a deliberate apples-to-apples constraint: the memory layer gets exactly one <code>search()</code> per question and the answer LLM gets exactly one completion. There is no ReAct-style tool loop, no self-querying, no retry-on-low-confidence. It measures the quality of the <a href="memory-algorithm.html">retrieval algorithm</a> itself, not an agent's ability to compensate for it. (Note the LangMem baseline is the exception — see <a href="#experiment-runner">Baselines</a>.)</aside>
+<p>The metric definitions from <code>evaluation/README.md</code>:</p>
+<ul>
+  <li><strong>LLM score</strong> — binary 0/1 correctness from an LLM judge. This is the headline accuracy metric.</li>
+  <li><strong>BLEU / token-F1</strong> — surface-overlap metrics, reported alongside but secondary (judge correctness is what the paper leads with).</li>
+  <li><strong>Token consumption</strong> — tokens needed to produce the final answer (the "Tokens" column, ~7K).</li>
+  <li><strong>Latency</strong> — search + answer-generation time (the "Latency p50" column, ~1s).</li>
+</ul>
+</section>
+
+<section id="headline-results">
+<h2>Headline results (April 2026)</h2>
+<p>From the top-level <code>README.md</code> "New Memory Algorithm (April 2026)" section. "Old" is the previous mem0 algorithm; "New" is the <a href="memory-algorithm.html">single-pass ADD-only algorithm</a>. All run on the same production-representative model stack.</p>
+<table>
+  <thead>
+    <tr><th>Benchmark</th><th>Old</th><th>New (accuracy)</th><th>Tokens</th><th>Latency p50</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>LoCoMo</strong></td><td>71.4</td><td><strong>91.6</strong></td><td>7.0K</td><td>0.88s</td></tr>
+    <tr><td><strong>LongMemEval</strong></td><td>67.8</td><td><strong>94.8</strong></td><td>6.8K</td><td>1.09s</td></tr>
+    <tr><td><strong>BEAM (1M)</strong></td><td>&mdash;</td><td><strong>64.1</strong></td><td>6.7K</td><td>1.00s</td></tr>
+    <tr><td><strong>BEAM (10M)</strong></td><td>&mdash;</td><td><strong>48.6</strong></td><td>6.9K</td><td>1.05s</td></tr>
+  </tbody>
+</table>
+<p>Research-highlights gloss from the same README:</p>
+<ul>
+  <li><strong>LoCoMo 91.6</strong> &mdash; +20 points over the previous algorithm.</li>
+  <li><strong>LongMemEval 94.8</strong> &mdash; +27 points, with <strong>+53.6 on assistant (agent) memory recall</strong> specifically. This jump is directly attributed to making agent-generated facts first-class (see below).</li>
+  <li><strong>BEAM (1M) 64.1</strong> &mdash; "production-scale memory evaluation at 1M tokens." BEAM has no "Old" baseline because it post-dates the previous algorithm.</li>
+</ul>
+<aside class="callout insight"><strong>Insight: the token/latency budget is the real story.</strong> Across all four benchmarks the retrieval footprint is ~6.7&ndash;7.0K tokens and p50 latency is ~1 second. The pitch is not "highest accuracy at any cost" — it is high accuracy at a <em>small, near-constant</em> context budget, which is what makes the algorithm cheap to run in production. Compare against the full-context baseline, which feeds the entire conversation into the LLM every turn.</aside>
+<details>
+<summary>Deep dive: which algorithm change drove which number</summary>
+<p>The README attributes the gains to five concrete changes, all of which are documented on <a href="memory-algorithm.html">the Memory Algorithm page</a>:</p>
+<dl>
+  <dt>Single-pass ADD-only extraction</dt><dd>One LLM call per add; no UPDATE/DELETE phase. Memories accumulate and nothing is overwritten — removing the lossy reconciliation step that previously discarded correct facts.</dd>
+  <dt>Agent-generated facts are first-class</dt><dd>When an agent confirms an action, that statement is stored with equal weight to user statements. This is what produced the <strong>+53.6 on assistant memory recall</strong> in LongMemEval.</dd>
+  <dt>Entity linking</dt><dd>Entities extracted, embedded, and linked across memories to boost retrieval.</dd>
+  <dt>Multi-signal retrieval</dt><dd>Semantic + BM25 keyword + entity matching scored in parallel and fused.</dd>
+  <dt>Temporal reasoning</dt><dd>Time-aware ranking that selects the right dated instance for "current state" vs "past event" vs "upcoming plan" queries.</dd>
+</dl>
+</details>
+</section>
+
+<section id="datasets">
+<h2>Datasets &amp; benchmarks</h2>
+<p>Three benchmarks appear in the headline table; only LoCoMo is wired into this repo's harness.</p>
+<dl>
+  <dt>LoCoMo</dt>
+  <dd>Multi-session conversational QA between two speakers, with timestamped turns and category-tagged questions. The harness expects <code>dataset/locomo10.json</code> (original, for mem0/OpenAI/Zep) and <code>dataset/locomo10_rag.json</code> (RAG-formatted, for RAG/LangMem). These files are <strong>not</strong> committed — <code>evaluation/README.md</code> points to a Google Drive download and instructs placing them under <code>dataset/</code>.</dd>
+  <dt>LongMemEval</dt>
+  <dd>Long-context memory evaluation emphasizing assistant/agent recall. Run via the external <code>memory-benchmarks</code> repo, not this tree.</dd>
+  <dt>BEAM</dt>
+  <dd>"Production-scale" memory benchmark evaluated at two context scales: <strong>1M tokens</strong> (64.1) and <strong>10M tokens</strong> (48.6). The accuracy drop from 1M to 10M quantifies how retrieval quality degrades as the haystack grows roughly 10&times;.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Gotcha: the in-repo harness only covers LoCoMo.</strong> If you clone <code>evaluation/</code> expecting to reproduce the LongMemEval 94.8 or BEAM numbers, you will not find runners for them. <code>run_experiments.py</code> hard-codes <code>dataset/locomo10.json</code> / <code>dataset/locomo10_rag.json</code> for every technique. The LongMemEval and BEAM results come from <code>github.com/mem0ai/memory-benchmarks</code>.</aside>
+</section>
+
+<section id="experiment-runner">
+<h2>The experiment runner</h2>
+<p>One entrypoint, <code>evaluation/run_experiments.py</code>, dispatches to a technique-specific manager class. Each manager reads the LoCoMo dataset, produces answers, and streams a results JSON to <code>results/</code>.</p>
+<h3 id="cli">CLI &amp; dispatch</h3>
+<p>The parser accepts <code>--technique_type</code> (one of <code>mem0</code>, <code>rag</code>, <code>langmem</code>, <code>zep</code>, <code>openai</code> — the <code>TECHNIQUES</code> list in <code>evaluation/src/utils.py</code>), <code>--method</code> (<code>add</code> | <code>search</code>, the <code>METHODS</code> list), plus retrieval knobs:</p>
+<pre><code class="language-bash"># mem0 (hosted) add then search
+python run_experiments.py --technique_type mem0 --method add
+python run_experiments.py --technique_type mem0 --method search --top_k 30
+
+# mem0 + graph (Mem0+)
+python run_experiments.py --technique_type mem0 --method add --is_graph
+python run_experiments.py --technique_type mem0 --method search --is_graph --top_k 30
+
+# RAG (chunk_size 500) and full-context (chunk_size -1)
+python run_experiments.py --technique_type rag --chunk_size 500 --num_chunks 1
+python run_experiments.py --technique_type rag --chunk_size -1 --num_chunks 1</code></pre>
+<p>The dispatch is a flat <code>if/elif</code> chain in <code>main()</code>. Notable per-branch behaviour:</p>
+<ul>
+  <li><strong>mem0 / add</strong> &rarr; <code>MemoryADD(data_path="dataset/locomo10.json", is_graph=...)</code> then <code>process_all_conversations()</code>.</li>
+  <li><strong>mem0 / search</strong> &rarr; <code>MemorySearch</code>; the output filename encodes the run config: <code>mem0_results_top_{top_k}_filter_{filter_memories}_graph_{is_graph}.json</code>.</li>
+  <li><strong>rag</strong> &rarr; <code>RAGManager(...)</code>; output <code>rag_results_{chunk_size}_k{num_chunks}.json</code>. <code>chunk_size=-1</code> is the sentinel for full-context.</li>
+  <li><strong>langmem / zep / openai</strong> &rarr; fixed output filenames.</li>
+</ul>
+<aside class="callout gotcha"><strong>Gotcha: <code>--filter_memories</code> and <code>--is_graph</code> are <code>store_true</code> flags.</strong> Passing <code>--filter_memories False</code> does <em>not</em> turn filtering off — argparse treats the bare presence of the flag as <code>True</code> and ignores the trailing token. The README's parameter table listing a "False" default is the absence-of-flag default, not a value you pass.</aside>
+<h3 id="add-vs-search">add vs search as separate passes</h3>
+<p>mem0 (and Zep) split ingestion and querying into two CLI invocations. <code>add</code> writes memories into the hosted store; <code>search</code> later queries them. They are decoupled because ingestion is expensive and you typically run it once, then sweep retrieval settings (<code>top_k</code>, graph on/off) across many <code>search</code> runs without re-ingesting. See <a href="data-flow.html">Data Flow</a> for the underlying add()/search() sequences.</p>
+<h3 id="modes-table">Technique &amp; mode matrix</h3>
+<table>
+  <thead><tr><th>Technique</th><th>Manager class / file</th><th>Backend</th><th>Dataset</th><th>Phases</th></tr></thead>
+  <tbody>
+    <tr><td>mem0</td><td><code>MemoryADD</code>, <code>MemorySearch</code> (<code>src/memzero/</code>)</td><td>Hosted platform via <code>MemoryClient</code></td><td><code>locomo10.json</code></td><td>add + search</td></tr>
+    <tr><td>mem0+graph (Mem0+)</td><td>same, <code>is_graph=True</code></td><td>Hosted + graph relations</td><td><code>locomo10.json</code></td><td>add + search</td></tr>
+    <tr><td>rag</td><td><code>RAGManager</code> (<code>src/rag.py</code>)</td><td>OpenAI embeddings + cosine search</td><td><code>locomo10_rag.json</code></td><td>single pass</td></tr>
+    <tr><td>full-context</td><td><code>RAGManager</code>, <code>chunk_size=-1</code></td><td>Whole transcript in prompt</td><td><code>locomo10_rag.json</code></td><td>single pass</td></tr>
+    <tr><td>langmem</td><td><code>LangMemManager</code> (<code>src/langmem.py</code>)</td><td>LangGraph ReAct agent + InMemoryStore</td><td><code>locomo10_rag.json</code></td><td>combined</td></tr>
+    <tr><td>zep</td><td><code>ZepAdd</code>, <code>ZepSearch</code> (<code>src/zep/</code>)</td><td>Zep Cloud</td><td><code>locomo10.json</code></td><td>add + search</td></tr>
+    <tr><td>openai</td><td><code>OpenAIPredict</code> (<code>src/openai/predict.py</code>)</td><td>Pre-dumped memory files</td><td><code>locomo10.json</code></td><td>predict only</td></tr>
+  </tbody>
+</table>
+<p>The Makefile (<code>evaluation/Makefile</code>) wraps each of these into named targets (<code>run-mem0-add</code>, <code>run-mem0-plus-search</code>, <code>run-rag</code>, <code>run-full-context</code>, <code>run-langmem</code>, <code>run-zep-add</code>/<code>-search</code>, <code>run-openai</code>).</p>
+</section>
+
+<section id="techniques">
+<h2>Technique implementations</h2>
+
+<h3 id="mem0-runner">mem0 (hosted): MemoryADD / MemorySearch</h3>
+<p>Both classes talk to the hosted platform through <code>mem0.MemoryClient</code> (see <a href="client-sdk.html">Hosted Client &amp; Proxy</a>), <em>not</em> the OSS <a href="memory-engine.html">Memory engine</a>. They authenticate with <code>MEM0_API_KEY</code> / <code>MEM0_ORGANIZATION_ID</code> / <code>MEM0_PROJECT_ID</code> from the environment.</p>
+<ul>
+  <li><code>MemoryADD</code> first calls <code>update_project(custom_instructions=...)</code> with a long prompt steering memory extraction toward self-contained personal narratives (named people not "user", emotional context, exact dates). It then ingests each conversation: per speaker, batched (<code>batch_size=2</code>), each speaker on its own thread, with <code>delete_all(user_id=...)</code> first to guarantee a clean slate. User ids are namespaced per conversation index: <code>f"{speaker}_{idx}"</code>.</li>
+  <li>Critically, <code>add()</code> is called with <strong>roles swapped between the two speakers</strong> (<code>messages</code> vs <code>messages_reverse</code>): for speaker A, A's lines are <code>role:"user"</code> and B's are <code>assistant</code>; for speaker B the reverse. Each speaker gets their own first-person memory store.</li>
+  <li><code>MemorySearch</code> issues one <code>search()</code> per speaker per question with <code>top_k</code> (default 30) and optional <code>filter_memories</code>. Returned memories are reduced to <code>{memory, timestamp, score}</code> and rendered into <code>ANSWER_PROMPT</code> for a final <code>gpt-*</code> completion at <code>temperature=0</code>.</li>
+</ul>
+<aside class="callout perf"><strong>Perf: concurrency everywhere.</strong> Ingestion runs a <code>ThreadPoolExecutor(max_workers=10)</code> over conversations, and within each conversation the two speakers ingest on separate <code>threading.Thread</code>s. Both add and search wrap the network call in a 3-attempt retry with a 1s backoff (<code>add_memory</code>, <code>search_memory</code>).</aside>
+
+<h3 id="mem0-graph">mem0 + graph (Mem0+)</h3>
+<p>Setting <code>--is_graph</code> flips ingestion to <code>enable_graph=True</code> and search to <code>enable_graph=True, output_format="v1.1"</code>. The v1.1 response carries both <code>results</code> (semantic memories) and <code>relations</code> (graph triples), which <code>MemorySearch</code> destructures into <code>{source, relationship, target}</code> and threads into the graph-aware prompt <code>ANSWER_PROMPT_GRAPH</code>. See <a href="graph-memory.html">Graph Memory</a> for the status of graph in OSS core (it has been removed from OSS and replaced by entity linking; this hosted-platform path is distinct).</p>
+
+<h3 id="rag-baseline">RAG baseline &amp; full-context</h3>
+<p><code>RAGManager</code> (<code>evaluation/src/rag.py</code>) is a from-scratch RAG: it flattens the conversation into <code>"{timestamp} | {speaker}: {text}"</code> lines, tokenizes with <code>tiktoken</code>, splits into fixed-size chunks, embeds each chunk with the configured OpenAI embedding model, and at query time computes cosine similarity by hand (<code>np.dot</code> over normalized vectors) to pick the top-<code>k</code> chunks (default k=1). The chunks are joined with a <code>\n&lt;-&gt;\n</code> separator and passed to a short answer prompt.</p>
+<aside class="callout decision"><strong>Decision: <code>chunk_size == -1</code> is the full-context switch.</strong> In <code>create_chunks</code>, a chunk size of -1 short-circuits chunking and returns the entire transcript as a single "chunk" with no embeddings; <code>process_all_conversations</code> then skips search entirely (<code>search_time = 0</code>) and stuffs the whole conversation into the prompt. This is how the <code>run-full-context</code> target reuses the RAG code path to implement the full-context baseline.</aside>
+
+<h3 id="langmem-baseline">LangMem baseline</h3>
+<p><code>LangMemManager</code> (<code>evaluation/src/langmem.py</code>) builds a <strong>LangGraph ReAct agent</strong> per speaker (<code>create_react_agent</code>) backed by an <code>InMemoryStore</code> (1536-dim OpenAI index) and a <code>MemorySaver</code> checkpointer, armed with LangMem's <code>create_manage_memory_tool</code> and <code>create_search_memory_tool</code>. Each chat message is fed to the matching speaker's agent via <code>add_memory</code>; at query time both agents are queried and their two responses are fused by <code>get_answer()</code> into the same <code>ANSWER_PROMPT</code> used by mem0. Conversations are parallelized with a <code>multiprocessing.Pool(processes=10)</code>.</p>
+<aside class="callout gotcha"><strong>Gotcha: LangMem is the one agentic baseline.</strong> Unlike the single-pass techniques, LangMem uses a tool-calling ReAct loop for both ingestion and retrieval. This is a property of LangMem itself, not the harness — worth noting when comparing its latency/accuracy to the single-pass numbers. Also note a latent bug: on an exception in <code>search_memory</code> it returns <code>t2 - t1</code> where <code>t2</code> was never assigned (the timer is only started, so this raises <code>UnboundLocalError</code> in the error path).</aside>
+
+<h3 id="openai-baseline">OpenAI baseline</h3>
+<p><code>OpenAIPredict</code> (<code>evaluation/src/openai/predict.py</code>) is "predict-only": it reads pre-exported memory dumps from <code>memories/{idx}.txt</code> (one file per conversation, produced out-of-band by exporting OpenAI's ChatGPT memory feature) and feeds them straight into the answer prompt. <code>search_memory</code> returns the raw file contents with a hard-coded search time of 0. There is no live OpenAI memory API call in this code path.</p>
+
+<h3 id="zep-baseline">Zep baseline</h3>
+<p><code>ZepAdd</code> / <code>ZepSearch</code> (<code>evaluation/src/zep/</code>) drive Zep Cloud via the <code>zep_cloud</code> SDK, creating a user + session per conversation and adding each turn as a <code>Message</code>. They use the dedicated <code>ANSWER_PROMPT_ZEP</code> (single-store, no per-speaker split). Note <code>ZepAdd.process_all_conversations</code> only ingests <code>idx == 0</code> — it is gated to the first conversation, presumably to control Zep API cost during development.</p>
+</section>
+
+<section id="scoring">
+<h2>Scoring pipeline</h2>
+<p>Scoring is a separate two-step pass that consumes the runner's results JSON.</p>
+<pre class="mermaid">
+flowchart LR
+  A[results/*.json<br/>question, answer, response, category] --> B[evals.py<br/>process_item per conversation]
+  B --> C[calculate_metrics<br/>token-F1]
+  B --> D[calculate_bleu_scores<br/>BLEU-1..4]
+  B --> E[evaluate_llm_judge<br/>GPT-4o-mini 0/1]
+  C & D & E --> F[evaluation_metrics.json]
+  F --> G[generate_scores.py<br/>pandas groupby category]
+  G --> H[per-category + overall<br/>bleu / f1 / llm means]
+</pre>
+
+<h3 id="evals">evals.py — per-item scoring</h3>
+<p><code>evaluation/evals.py</code> loads a results file, then for each conversation's QA list computes three numbers per item: <code>bleu_score</code> (the BLEU-1 component), <code>f1_score</code> (token-F1), and <code>llm_score</code> (the judge's 0/1). It fans work out across a <code>ThreadPoolExecutor</code> (default 10 workers, one task per conversation) and writes the augmented records to <code>evaluation_metrics.json</code>.</p>
+<aside class="callout gotcha"><strong>Gotcha: category 5 is always skipped.</strong> Both <code>evals.py</code> and the standalone <code>metrics/llm_judge.py</code> explicitly <code>continue</code> when <code>category == "5"</code>. In LoCoMo, category 5 is the adversarial / "unanswerable" class — it is excluded from the reported accuracy. The runner still records <code>adversarial_answer</code> fields, but the scorer drops those questions entirely.</aside>
+
+<h3 id="llm-judge">LLM-as-judge</h3>
+<p><code>evaluation/metrics/llm_judge.py</code> defines <code>evaluate_llm_judge(question, gold_answer, generated_answer)</code>. It calls <strong>gpt-4o-mini</strong> at <code>temperature=0.0</code> with <code>response_format={"type":"json_object"}</code>, asking it to label the answer <code>CORRECT</code> or <code>WRONG</code> and return <code>{"label": ...}</code>. The function maps <code>CORRECT &rarr; 1</code>, everything else <code>&rarr; 0</code>.</p>
+<ul>
+  <li>The <code>ACCURACY_PROMPT</code> instructs the judge to be <strong>generous</strong>: a much longer generated answer counts as correct as long as it touches the same topic; date formats and relative time references that resolve to the same date count as correct.</li>
+  <li>The JSON is parsed via mem0's own <code>extract_json</code> (<code>mem0/memory/utils.py</code>) rather than a bare <code>json.loads</code>, hardening against fenced/markdown-wrapped model output.</li>
+  <li>The prompt warns the model never to emit both labels ("it will break the evaluation script") — the downstream check is a literal string equality on <code>"CORRECT"</code>.</li>
+</ul>
+<aside class="callout insight"><strong>Insight: the judge is the headline metric.</strong> BLEU and F1 are surface-overlap metrics that punish the verbose, correct answers an LLM naturally produces. Because LoCoMo gold answers are terse (often 1&ndash;5 words) and generated answers can be longer, the generous LLM judge is the metric that actually tracks "did the system remember the right thing." The "91.6" / "94.8" headline numbers are judge accuracy, not BLEU/F1.</aside>
+
+<h3 id="metrics-utils">Surface metrics — metrics/utils.py</h3>
+<p><code>evaluation/metrics/utils.py</code> (adapted from the A-Mem project, per its docstring) implements the lexical/semantic metrics. <code>calculate_metrics</code> returns exact-match plus a set-based token-F1 (precision/recall over deduplicated lowercased tokens). <code>calculate_bleu_scores</code> computes BLEU-1 through BLEU-4 with NLTK and method-1 smoothing. The module also carries ROUGE, METEOR, BERTScore, and SentenceTransformer cosine-similarity helpers (importing <code>bert_score</code>, <code>rouge_score</code>, <code>sentence-transformers</code>), but <code>evals.py</code> only uses BLEU-1 and F1.</p>
+<aside class="callout gotcha"><strong>Gotcha: heavy import side effects.</strong> Importing <code>metrics/utils.py</code> downloads NLTK <code>punkt</code>/<code>wordnet</code> and eagerly loads the <code>all-MiniLM-L6-v2</code> SentenceTransformer at module import time. Both are wrapped in try/except, so failures degrade to warnings rather than crashing — but the first run pulls models off the network even though most of those metrics are never invoked by the standard scorer.</aside>
+
+<h3 id="generate-scores">generate_scores.py — aggregation</h3>
+<p><code>evaluation/generate_scores.py</code> loads <code>evaluation_metrics.json</code>, flattens it into a pandas DataFrame, coerces <code>category</code> to numeric, and reports mean <code>bleu_score</code> / <code>f1_score</code> / <code>llm_score</code> per category (with question counts) plus the overall means. It is a thin reporting layer with no CLI args — paths are hard-coded.</p>
+</section>
+
+<section id="answer-prompts">
+<h2>Answer prompts</h2>
+<p><code>evaluation/prompts.py</code> holds the prompts used to turn retrieved memories into a final short answer. They share a common spine and differ only by what memory shape they consume.</p>
+<dl>
+  <dt><code>ANSWER_PROMPT</code></dt><dd>Two-speaker memories, no graph. Used by mem0 (non-graph), LangMem, and as the fusion prompt in LangMem.</dd>
+  <dt><code>ANSWER_PROMPT_GRAPH</code></dt><dd>Adds per-speaker knowledge-graph relations alongside the memories; used by the Mem0+ graph path.</dd>
+  <dt><code>ANSWER_PROMPT_ZEP</code></dt><dd>Single combined memory blob (no per-speaker split), for the Zep baseline.</dd>
+</dl>
+<p>All three encode the same evaluation-shaping rules, which matter for interpreting the scores:</p>
+<ul>
+  <li>"The answer should be less than 5-6 words" — forces terse answers that align with LoCoMo's short gold answers.</li>
+  <li>Detailed <strong>temporal-reasoning</strong> instructions: prioritize the most recent memory on contradiction, and convert relative time references ("last year") to absolute dates using the memory timestamp.</li>
+  <li>"Do not confuse character names mentioned in memories with the actual users who created those memories" — a guard against the role-swapped ingestion described in <a href="#mem0-runner">the mem0 runner</a>.</li>
+</ul>
+<p>Note these are templated with Jinja2 (<code>{{...}}</code>) in the per-speaker code and rendered via <code>jinja2.Template</code>. RAG and the OpenAI baseline define their own minimal inline prompts rather than reusing these.</p>
+</section>
+
+<section id="reproducing">
+<h2>Reproducing &amp; environment</h2>
+<p>Configuration is entirely environment-driven (<code>.env</code> loaded via <code>python-dotenv</code>):</p>
+<ul>
+  <li><code>OPENAI_API_KEY</code>, <code>MODEL</code> (e.g. <code>gpt-4o-mini</code>), <code>EMBEDDING_MODEL</code> (e.g. <code>text-embedding-3-small</code>) — shared by every technique's answer LLM and the RAG embedder.</li>
+  <li><code>MEM0_API_KEY</code> / <code>MEM0_ORGANIZATION_ID</code> / <code>MEM0_PROJECT_ID</code> — for the hosted mem0 / Mem0+ runs.</li>
+  <li><code>ZEP_API_KEY</code> — for the Zep baseline.</li>
+</ul>
+<p>End-to-end for LoCoMo:</p>
+<pre><code class="language-bash"># 1. place dataset/locomo10.json and dataset/locomo10_rag.json
+# 2. ingest + retrieve
+make run-mem0-add
+make run-mem0-search
+# 3. score
+python evals.py --input_file results/mem0_results_top_30_filter_False_graph_False.json \
+                --output_file evaluation_metrics.json
+# 4. aggregate
+python generate_scores.py</code></pre>
+<aside class="callout decision"><strong>The headline numbers live elsewhere.</strong> To reproduce LoCoMo 91.6 / LongMemEval 94.8 / BEAM 64.1, use the open-sourced <code>github.com/mem0ai/memory-benchmarks</code> framework the README links — this <code>evaluation/</code> tree is the original paper's LoCoMo harness and predates the BEAM/LongMemEval headline table.</aside>
+<p>For the algorithm whose quality these benchmarks measure, see <a href="memory-algorithm.html">Memory Algorithm</a>; for how the system is wired together, <a href="architecture.html">Architecture Overview</a>; and for cross-cutting gotchas (like category-5 skipping and the LangMem error-path bug), <a href="surprises.html">Surprises &amp; Gotchas</a>.</p>
+</section>

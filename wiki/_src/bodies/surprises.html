@@ -1,0 +1,277 @@
+<h1>Surprises &amp; Gotchas</h1>
+<p class="lead">This page collects the cross-cutting things that surprised us while reading the mem0 source: clever patterns worth stealing, latent footguns, performance and security subtleties, and the deprecations that make the code disagree with its own docs. The single biggest theme: the April-2026 rewrite turned mem0 into an <strong>ADD-only, single-LLM-call engine with no graph database and no LLM-driven UPDATE/DELETE</strong> — and a lot of older docs, prompts, and config keys still ship as dead weight. Every claim here was checked against the tree; counts were recounted from the actual provider files, not from <code>AGENTS.md</code>.</p>
+
+<aside class="callout decision"><strong>The one mental model that explains half this page</strong> The engine no longer asks the LLM to reconcile new facts against old ones. <code>add()</code> makes exactly one LLM call with <code>ADDITIVE_EXTRACTION_PROMPT</code>, emits only <code>ADD</code> events, dedupes mechanically by MD5 hash, and never overwrites. UPDATE/DELETE happen only when a caller invokes <code>update()</code>/<code>delete()</code> directly. Relationship awareness comes from a per-collection entity vector store, not a graph DB. Once you internalize this, most of the "this code branch never fires" surprises below follow directly. See <a href="memory-algorithm.html">the algorithm</a>.</aside>
+
+<section id="clever-patterns">
+<h2>Clever patterns</h2>
+<p>Techniques in the codebase that are non-obvious but generalizable.</p>
+
+<dl>
+  <dt><strong>Factories store providers as dotted strings, imported lazily</strong></dt>
+  <dd>Every factory in <code>mem0/utils/factory.py</code> maps a provider name to a dotted import path (e.g. <code>"mem0.vector_stores.qdrant.Qdrant"</code>), resolved on demand by <code>load_class()</code> (<code>importlib.import_module</code> + <code>getattr</code>). Heavy backend SDKs (boto3, sentence-transformers, google-genai) are imported only when that provider is actually selected; an unknown name raises <code>ValueError</code> at <code>create()</code> time. Each native-SDK provider also wraps its own import in <code>try/except ImportError</code> with a pip-install hint. See <a href="config-system.html">the config system</a>.</dd>
+
+  <dt><strong>Anti-hallucination integer ID mapping for dedup</strong></dt>
+  <dd>When existing memories are shown to the LLM for dedup context, they are presented with sequential integer IDs (<code>"0"</code>, <code>"1"</code>, …) while a separate <code>uuid_mapping</code> dict resolves them back to real UUIDs. The model never sees a raw UUID, so it cannot fabricate or corrupt one; persisted memories always get a fresh <code>uuid.uuid4()</code>. See <a href="memory-algorithm.html#single-pass-add">the algorithm</a>.</dd>
+
+  <dt><strong>Entity boosts are spread-attenuated so hubs can't dominate</strong></dt>
+  <dd><code>_compute_entity_boosts</code> in <code>mem0/memory/main.py</code> weights each match by <code>similarity * 0.5 * (1 / (1 + 0.001·(num_linked−1)²))</code>. A promiscuous entity (e.g. the user's own name, linked to hundreds of memories) contributes a far smaller per-memory boost, capped at <code>ENTITY_BOOST_WEIGHT = 0.5</code>. Only entity-store hits with similarity ≥ 0.5 count toward a boost; entity upsert/linking uses a much stricter ≥ 0.95 match threshold. See <a href="memory-algorithm.html#multi-signal-retrieval">retrieval scoring</a>.</dd>
+
+  <dt><strong>Adaptive divisor keeps fused scores comparable</strong></dt>
+  <dd><code>score_and_rank</code> in <code>mem0/utils/scoring.py</code> normalizes the additive sum (semantic + BM25 + entity) by a <code>max_possible</code> divisor that adapts to which signals fired: 1.0 semantic-only, 1.5 semantic+entity, 2.0 semantic+BM25, 2.5 all three. BM25 and entity are additive bonuses on top of baseline semantic relevance, never a re-weighting of it. See <a href="data-flow.html#search-fusion">data flow</a>.</dd>
+
+  <dt><strong><code>extract_json</code> salvages dirty/fenced JSON from weak models</strong></dt>
+  <dd>Tool arguments and JSON bodies pass through <code>mem0.memory.utils.extract_json</code> before <code>json.loads</code>, recovering JSON wrapped in markdown fences or prose — a recurring failure mode for small/local models. Bedrock even round-trips dict input through it. See <a href="llms.html">LLM providers</a>.</dd>
+
+  <dt><strong>Self-healing deferred initialization (TS OSS)</strong></dt>
+  <dd>Vector-store creation is deferred to <code>_autoInitialize()</code> so the embedding dimension can be auto-probed. <code>_ensureInitialized()</code> stores the first failure instead of throwing from the constructor and retries on the next method call, so a transiently-down embedder or store at startup doesn't permanently brick the instance. See <a href="typescript-sdk.html">the TypeScript SDK</a>.</dd>
+
+  <dt><strong>Single-use refresh tokens via one conditional UPDATE</strong></dt>
+  <dd><code>consume_refresh_jti()</code> in <code>server/auth.py</code> runs <code>UPDATE refresh_token_jtis SET used_at=now WHERE jti=? AND used_at IS NULL AND expires_at&gt;now</code> and checks <code>rowcount==0</code> to 401. This collapses the read-check-write race into a single atomic statement, so concurrent replays of the same token race on one row and at most one wins. See <a href="server.html#auth">the server</a>.</dd>
+
+  <dt><strong>OTP claim upgrades an agent key in place</strong></dt>
+  <dd>In the CLI, <code>claim_via_otp()</code> reuses the email-code flow but adds <code>agent_mode_api_key</code> to the verify body; the backend upgrades the key in place, so the API key value never changes, memories transfer, and <code>agent_mode</code> flips false without disrupting a running agent. See <a href="integrations.html">Integrations</a>.</dd>
+
+  <dt><strong>Dream-gate orders checks cheapest-first</strong></dt>
+  <dd>OpenClaw's <code>dream-gate.ts</code> runs two local file-read gates (≥ 24h since last run, ≥ 5 sessions) before the one network round-trip for the ≥ 20 memory-count gate, and holds an exclusive <code>wx</code> lock file (reclaimed after 1h) so racing processes can't double-run consolidation. See <a href="integrations.html">Integrations</a>.</dd>
+</dl>
+
+<details><summary>Deep dive: AsyncMemory is a copy, not a wrapper</summary>
+<p><code>AsyncMemory</code> in <code>mem0/memory/main.py</code> is a full structural duplicate of <code>Memory</code> — every method body is copied, and async-ness comes solely from wrapping blocking calls (embed, vector ops, LLM, SQLite, lemmatize, entity extraction) in <code>asyncio.to_thread</code>. The single shared SQLite connection is opened with <code>check_same_thread=False</code> and protected by a process-local <code>threading.Lock</code>.</p>
+<aside class="callout perf"><strong>Not actually concurrent</strong> Both async <code>_add_to_vector_store</code> and <code>_search_vector_store</code> wrap each blocking step in <code>asyncio.to_thread</code> but <code>await</code> them <em>in sequence</em> — the steps do not run in parallel. The only genuine fan-out via <code>asyncio.gather</code> is <code>delete_all</code>. The reranker is dispatched through <code>to_thread</code> specifically so it can't block the event loop.</aside>
+</details>
+</section>
+
+<section id="performance">
+<h2>Performance surprises</h2>
+<p>Where the engine spends — or deliberately avoids spending — time and money.</p>
+
+<dl>
+  <dt><strong><code>infer=False</code> skips the LLM, dedup, and entity linking entirely</strong></dt>
+  <dd>The fast path stores each message verbatim via <code>_create_memory</code>: one embed + one vector insert + one ADD history row per message, with <code>name</code> promoted to <code>actor_id</code>. No existing-memory search, no extraction call, no hash dedup, no entity linking. It is the right choice for pre-cleaned facts where you want minimal latency and zero LLM cost. See <a href="data-flow.html#add-infer-false">data flow</a>.</dd>
+
+  <dt><strong>Lazy SDK imports keep <code>import mem0</code> cheap</strong></dt>
+  <dd>Because all provider SDK imports are deferred to <code>load_class()</code>, importing mem0 and building a <code>MemoryConfig</code> is cheap regardless of how many backends are installed — you only pay import cost for the providers you actually instantiate. The empty 0-byte <code>__init__.py</code> files in <code>mem0/embeddings/</code> and <code>mem0/llms/</code> are a feature, not a bug. See <a href="embeddings.html">embeddings</a>.</dd>
+
+  <dt><strong><code>text_lemmatized</code> is precomputed at write time</strong></dt>
+  <dd>The engine writes a lemmatized copy of the memory text into the payload on insert, so BM25/keyword search only lemmatizes the query at read time rather than re-tokenizing the whole corpus — cheap enough to run hybrid search on every <code>search()</code>. See <a href="vector-stores.html">vector stores</a>.</dd>
+
+  <dt><strong>AWS Bedrock pings the control plane during construction</strong></dt>
+  <dd><code>AWSBedrockLLM.__init__</code> calls <code>list_foundation_models</code> to validate region/model, adding a network round-trip to <code>Memory()</code> setup for Bedrock users (failures are downgraded to a warning). See <a href="llms.html">LLM providers</a>.</dd>
+
+  <dt><strong>LLMReranker makes N LLM calls per search</strong></dt>
+  <dd>It scores each candidate document with a separate synchronous LLM call, making it by far the slowest and most expensive reranker — best reserved for small candidate pools or offline eval. See <a href="rerankers.html">rerankers</a>.</dd>
+
+  <dt><strong>Qdrant is the only store with native batched search</strong></dt>
+  <dd>The base <code>search_batch</code> loops over <code>search()</code> sequentially; Qdrant alone overrides it with <code>query_batch_points</code> (plus a sequential fallback on error). Heavy batch workloads on other stores are silently serial. See <a href="vector-stores.html">vector stores</a>.</dd>
+
+  <dt><strong>Server request logs are written off the hot path and pruned manually</strong></dt>
+  <dd><code>_persist_request_log</code> runs via <code>loop.run_in_executor</code> so DB writes never block responses. The append-only <code>request_logs</code> table (~864k rows/day at 10 req/s) uses a BRIN index on <code>created_at</code> and is pruned <em>only</em> by <code>scripts/prune_request_logs.py</code> / <code>make prune-logs</code> — nothing prunes automatically. See <a href="server.html">the server</a>.</dd>
+
+  <dt><strong>Plugin hooks are engineered to never block the editor</strong></dt>
+  <dd>Every <code>mem0-plugin</code> hook command ends with <code>2&gt;/dev/null || true</code>, scripts exit 0 with 3–8s timeouts, and <code>auto_capture.py</code> reads only the transcript tail (200 lines / 8000 chars) and posts with <code>infer=True</code> so extraction is async — a slow capture can never stall the session. See <a href="integrations.html">Integrations</a>.</dd>
+</dl>
+</section>
+
+<section id="correctness-gotchas">
+<h2>Correctness &amp; gotchas</h2>
+<p>Behavior that looks one way and is actually another — the highest-risk section for callers.</p>
+
+<h3>The ADD-only consequence: dead branches everywhere</h3>
+<aside class="callout gotcha"><strong>Code branching on UPDATE/DELETE events silently never fires</strong> Since <code>add()</code> emits only <code>event: 'ADD'</code>, any caller (or test) that switches on returned UPDATE/DELETE events is dead code. Memories accumulate and nothing is overwritten or deleted on the add path. Use <code>update()</code>/<code>delete()</code> explicitly. See <a href="memory-algorithm.html">the algorithm</a>.</aside>
+
+<h3>Silent empty results</h3>
+<ul>
+  <li><strong><code>add()</code> returns <code>{"results": []}</code> on extraction failure without raising.</strong> If the LLM call fails, returns nothing, or all candidates are hash-deduped, <code>add()</code> logs at error/debug level and returns an empty list — but it still persists the raw messages and still calls <code>db.save_messages</code> to keep the rolling 10-message buffer for the next turn's Phase-0 context. <strong>Callers must inspect the list, not assume a write occurred.</strong> See <a href="memory-engine.html">the memory engine</a>.</li>
+  <li><strong>Conversation context is saved even when nothing is extracted</strong> — the buffer preservation above happens before the early <code>return []</code>. See <a href="data-flow.html">data flow</a>.</li>
+</ul>
+
+<h3>Asymmetric and inconsistent APIs</h3>
+<dl>
+  <dt><strong><code>search</code>/<code>get_all</code> reject top-level identifiers; <code>add</code> accepts them</strong></dt>
+  <dd><code>_reject_top_level_entity_params</code> raises <code>ValueError</code> if <code>user_id</code>/<code>agent_id</code>/<code>run_id</code> are passed as top-level kwargs to <code>search()</code> or <code>get_all()</code> — they must go inside <code>filters={...}</code>. <code>add()</code> (and on the hosted client, <code>delete_all()</code>) accept them directly. Identity params are valid on writes yet rejected on reads: a common runtime trap. See <a href="memory-engine.html">the engine</a> and <a href="client-sdk.html">the hosted client</a>.</dd>
+
+  <dt><strong>Sync and async raise different exceptions for the same bad input</strong></dt>
+  <dd>Sync <code>add()</code> raises <code>Mem0ValidationError VALIDATION_002</code> for an invalid <code>memory_type</code>, but async <code>add()</code> raises a plain <code>ValueError</code> for the identical condition. Catching <code>Mem0ValidationError</code> will miss the async path. See <a href="memory-engine.html">the engine</a>.</dd>
+
+  <dt><strong><code>delete_all</code> requires an identifier — there is no wipe shortcut</strong></dt>
+  <dd>It raises <code>ValueError</code> if called with no <code>user_id</code>/<code>agent_id</code>/<code>run_id</code>, explicitly pointing callers at <code>reset()</code> to clear everything. See <a href="memory-engine.html">the engine</a>.</dd>
+
+  <dt><strong>Vector-store result shapes are duck-typed and inconsistent</strong></dt>
+  <dd>There is no single <code>OutputData</code> — ~20 providers each define a local <code>OutputData(BaseModel)</code>, Redis uses <code>MemoryResult</code>, and Qdrant returns native point objects; the engine reads <code>.id</code>/<code>.score</code>/<code>.payload</code> by attribute. <code>list()</code> nesting also differs: pgvector/turbopuffer/redis return <code>[[OutputData,…]]</code>, Qdrant's <code>list()</code> returns the raw <code>scroll()</code> tuple while its <code>search()</code> returns a flat list. See <a href="vector-stores.html#interface">the interface</a>.</dd>
+</dl>
+
+<h3>Scoring &amp; retrieval edge cases</h3>
+<aside class="callout gotcha"><strong>Threshold gates the semantic score BEFORE fusion</strong> In <code>score_and_rank</code>, any candidate with <code>semantic_score &lt; threshold</code> is dropped before combining, so a strong BM25 hit or entity boost can <em>never</em> resurrect a sub-threshold semantic match. The candidate pool is also seeded only from semantic results (<code>_search_vector_store</code> over-fetches <code>max(limit·4, 60)</code>): a memory that matches BM25 or an entity but is absent from the semantic top-N cannot surface at all. See <a href="data-flow.html#search-fusion">data flow</a>.</aside>
+
+<ul>
+  <li><strong>No temporal/recency ranking at query time.</strong> <code>score_and_rank</code> never weights by <code>created_at</code>. Temporal reasoning is an <em>extraction-time</em> emergent property: <code>ADDITIVE_EXTRACTION_PROMPT</code> grounds relative references like "last week" to absolute dates against the Observation Date before storing, and because the engine is ADD-only, each dated instance becomes a separately retrievable memory. "Where did I live before SF?" matches the past instance directly — the cited reason the LoCoMo benchmark rose from 51% to 93%. See <a href="memory-algorithm.html#temporal-reasoning">temporal reasoning</a>.</li>
+  <li><strong>Score sign/scale is not normalized across stores.</strong> pgvector returns cosine distance (lower = closer), turbopuffer returns <code>1 − dist</code>, Redis returns raw <code>vector_distance</code>. Raw <code>.score</code> values are not comparable across backends; the engine's fusion accounts for this, your downstream code may not. See <a href="vector-stores.html">vector stores</a>.</li>
+  <li><strong>FAISS filters by in-memory post-filtering.</strong> No server-side filter engine: it over-fetches (<code>fetch_k = top_k·2</code>) then runs <code>_apply_filters</code> in Python, so filtered searches can under-return when matches fall outside the over-fetch window. See <a href="vector-stores.html">vector stores</a>.</li>
+  <li><strong><code>keyword_search</code> returns <code>None</code> as a "not supported" sentinel, not <code>[]</code>.</strong> <code>VectorStoreBase.keyword_search</code> defaults to <code>None</code>; the engine checks <code>if keyword_results is not None</code> before fusing BM25, so unsupported stores silently degrade to semantic-only. Returning <code>[]</code> would falsely claim support with zero hits. See <a href="vector-stores.html#interface">the interface</a>.</li>
+</ul>
+
+<h3>Reranking</h3>
+<dl>
+  <dt><strong>Two independent guards gate reranking; either alone is a silent no-op</strong></dt>
+  <dd>Reranking runs only if <em>both</em> a reranker is configured (<code>MemoryConfig.reranker</code> non-None) <em>and</em> <code>search(rerank=True)</code> is passed. An empty result set also short-circuits it. See <a href="rerankers.html">rerankers</a>.</dd>
+  <dt><strong>Silent provider-level fallback to <code>rerank_score</code> 0.0</strong></dt>
+  <dd>Every provider wraps scoring in <code>except Exception</code> and falls back to the original order with <code>rerank_score=0.0</code> (LLMReranker uses 0.5 per-document). Uniform 0.0 scores are the tell that reranking failed and you are seeing unreranked order. Scales also differ wildly across providers (API relevance, judged 0–1, raw cross-encoder logits, optional min-max), so <code>rerank_score</code> is not comparable across backends. See <a href="rerankers.html">rerankers</a>.</dd>
+</dl>
+
+<h3>Dimensions, NLP, and cross-SDK collections</h3>
+<aside class="callout gotcha"><strong>Two unsynced embedding-dimension fields</strong> <code>embedder.config.embedding_dims</code> and <code>vector_store.config.embedding_model_dims</code> are independent; nothing copies one into the other, and both happen to default to 1536. Choosing a non-1536 model (Gemini 768, Vertex 256, FastEmbed/HF auto-detect) without also setting <code>embedding_model_dims</code> creates a wrong-width index and breaks inserts. See <a href="embeddings.html">embeddings</a>.</aside>
+
+<ul>
+  <li><strong>The <code>nlp</code> extra silently degrades retrieval when absent.</strong> Without <code>mem0ai[nlp]</code>, <code>extract_entities</code> returns <code>[]</code> (no entity linking/boost) and <code>lemmatize_for_bm25</code> returns raw text. Qdrant additionally needs <code>fastembed</code> for BM25 sparse vectors; if missing it warns and disables BM25. <code>spacy_models.py</code> auto-downloads <code>en_core_web_sm</code> on first use and sets sticky failure flags otherwise. See <a href="memory-algorithm.html#nlp-extra">the algorithm</a>.</li>
+  <li><strong>Sharing one Qdrant collection across SDKs breaks BM25.</strong> Python writes the lemmatized field as <code>text_lemmatized</code> (snake_case); TypeScript writes <code>textLemmatized</code> (camelCase). A shared collection silently breaks lemma-based BM25 across languages — collections must be language/SDK-scoped. See <a href="memory-algorithm.html#nlp-extra">the algorithm</a>.</li>
+  <li><strong>Qdrant collections created before hybrid search cannot do BM25.</strong> They lack the named <code>bm25</code> sparse slot; writing into it is rejected. Qdrant detects this via <code>_has_bm25_slot</code> on init, warns, and disables BM25 (semantic still works). See <a href="vector-stores.html">vector stores</a>.</li>
+  <li><strong>OpenAI/Azure batch embeds re-sort by response index.</strong> <code>embed_batch</code> chunks into batches of 100 and re-sorts <code>response.data</code> by <code>.index</code> before returning, because the embeddings API does not guarantee output order matches input order — a naive list comprehension would silently misalign vectors with their source texts. See <a href="embeddings.html">embeddings</a>.</li>
+  <li><strong><code>MockEmbeddings</code> makes all memories identical.</strong> It always returns the same fixed 10-dim vector, so cosine similarity between any two memories is 1.0 and ranking is meaningless — fine for plumbing tests, useless for retrieval-quality tests. It doubles as the no-op stand-in for Upstash server-side embedding. See <a href="embeddings.html">embeddings</a>.</li>
+</ul>
+
+<h3>LLM provider quirks</h3>
+<dl>
+  <dt><strong>The abstract <code>generate_response</code> signature omits <code>response_format</code>, but every provider needs it</strong></dt>
+  <dd><code>LLMBase.generate_response</code> declares only <code>(messages, tools, tool_choice, **kwargs)</code>, yet the engine always calls it with <code>response_format={'type':'json_object'}</code>. Concrete providers add it explicitly; <code>SarvamLLM</code> accepts it only to ignore it. See <a href="llms.html">LLM providers</a>.</dd>
+  <dt><strong><code>xai</code> and <code>sarvam</code> silently drop tools/tool_choice</strong></dt>
+  <dd>Their <code>generate_response</code> signatures have no tool parameters, so a tool-calling caller gets plain text. They still work for memory extraction because the algorithm uses <code>response_format</code> JSON, not tools. See <a href="llms.html">LLM providers</a>.</dd>
+  <dt><strong>Anthropic and Bedrock omit <code>top_p</code> when temperature is set</strong></dt>
+  <dd>Both native <code>AnthropicLLM</code> and <code>AWSBedrockLLM</code> (<code>_build_inference_config</code>) drop <code>top_p</code>/<code>topP</code> when temperature is present, because Anthropic and MiniMax reasoning models raise a <code>ValidationException</code> if both are sent. See <a href="llms.html">LLM providers</a>.</dd>
+  <dt><strong><code>gpt-5-mini</code> (the default) is deliberately NOT a reasoning model</strong></dt>
+  <dd><code>LLMBase._is_reasoning_model</code> matches an exact set (<code>o1</code>, <code>o3</code>, <code>gpt-5</code>, <code>gpt-5o</code>, <code>gpt-5o-mini</code>, …) plus <code>o1-/o1./o3-/o3.</code> prefixes, and the comment explicitly excludes <code>gpt-5.x</code> variants that support temperature. The default <code>gpt-5-mini</code> is not in the set, so it goes through full sampling params. See <a href="llms.html">LLM providers</a>.</dd>
+  <dt><strong>Azure providers rewrite "assistant" → "ai" in the last message</strong></dt>
+  <dd>Both <code>AzureOpenAILLM</code> and <code>AzureOpenAIStructuredLLM</code> run <code>user_prompt.replace("assistant", "ai")</code> on the final message before sending — an undocumented quirk that can mangle legitimate content containing the substring "assistant". See <a href="llms.html">LLM providers</a>.</dd>
+  <dt><strong><code>reasoning_effort</code> is lost when passing a <code>BaseLlmConfig</code> object</strong></dt>
+  <dd>In <code>LlmFactory.create</code>, converting a <code>BaseLlmConfig</code> object to a provider-specific config copies only a fixed attribute list (model, temperature, api_key, max_tokens, top_p, top_k, enable_vision, vision_details, http_client_proxies). <code>reasoning_effort</code> is not in that list, so a base-config object can silently drop it; the dict path is safe because it spreads the whole dict. See <a href="config-system.html">the config system</a>.</dd>
+</dl>
+
+<h3>Evaluation harness traps</h3>
+<ul>
+  <li><strong>The in-repo harness only covers LoCoMo.</strong> <code>run_experiments.py</code> hard-codes <code>dataset/locomo10.json</code> for every technique; the headline LongMemEval (94.8) and BEAM (64.1/48.6) numbers come from the external <code>mem0ai/memory-benchmarks</code> repo, not this tree. See <a href="evaluation.html">evaluation</a>.</li>
+  <li><strong>Category 5 is silently dropped from scoring.</strong> Both <code>evals.py</code> and <code>metrics/llm_judge.py</code> <code>continue</code> when <code>category == 5</code> (LoCoMo's adversarial/unanswerable class), so reported accuracy excludes those questions even though the runner records <code>adversarial_answer</code>. See <a href="evaluation.html">evaluation</a>.</li>
+  <li><strong>The LLM judge is the real headline metric.</strong> LoCoMo gold answers are terse and generated answers verbose, so BLEU/F1 under-report; the GPT-4o-mini judge at temperature 0 is what the 91.6/94.8 numbers actually measure. See <a href="evaluation.html">evaluation</a>.</li>
+  <li><strong><code>store_true</code> flags ignore their argument.</strong> <code>--filter_memories False</code> still evaluates to <code>True</code> — the README "False" is the absence-of-flag default, not a passable value. See <a href="evaluation.html">evaluation</a>.</li>
+  <li><strong>LangMem's error path raises <code>UnboundLocalError</code>.</strong> Its <code>except</code> block returns <code>t2 - t1</code>, but <code>t2</code> is assigned only in the <code>try</code> before the failing call, so the handler itself crashes. Several baselines also don't hit live APIs: the OpenAI baseline reads pre-dumped <code>memories/{idx}.txt</code> and returns a hard-coded search time of 0; Zep ingests only <code>idx == 0</code>. See <a href="evaluation.html">evaluation</a>.</li>
+</ul>
+
+<h3>OpenMemory pitfalls</h3>
+<ul>
+  <li><strong><code>PUT /api/v1/config/</code> silently discards the update.</strong> <code>update_configuration()</code> builds <code>updated_config</code> but never calls <code>save_config_to_db()</code> and returns <code>None</code>. The working paths are <code>PATCH /</code> and the granular <code>/mem0/llm</code>, <code>/mem0/embedder</code>, <code>/mem0/vector_store</code>, <code>/openmemory</code> setters. See <a href="openmemory.html">OpenMemory</a>.</li>
+  <li><strong>MCP search bypasses the engine retrieval pipeline.</strong> <code>search_memory</code> does not call <code>memory_client.search()</code>; it manually embeds the query and calls <code>vector_store.search()</code> with <code>limit=10</code>, sidestepping reranking, score fusion, and entity linking. MCP search returns raw vector hits, not the engine's fused ranking. See <a href="openmemory.html">OpenMemory</a>.</li>
+  <li><strong>Auto-categorization is hard-wired to OpenAI.</strong> <code>categorization.py</code> instantiates a bare <code>OpenAI()</code> client and always calls <code>gpt-4o-mini</code> regardless of the configured provider, so categorization needs <code>OPENAI_API_KEY</code> even on Ollama/Anthropic setups. It runs inside SQLAlchemy <code>after_insert</code>/<code>after_update</code> listeners on a separate Session. See <a href="openmemory.html">OpenMemory</a>.</li>
+  <li><strong>Schema is owned by both <code>create_all</code> and Alembic.</strong> <code>main.py</code> calls <code>Base.metadata.create_all()</code> at import, so fresh installs build from ORM models while the Alembic chain is a separate manual mechanism. A model change not also encoded as a migration appears on new installs but never on upgraded ones. (Migration <code>Create Date</code> docstrings are decorative — only <code>down_revision</code> defines chain order.) See <a href="openmemory.html">OpenMemory</a>.</li>
+</ul>
+
+<h3>Client / proxy</h3>
+<ul>
+  <li><strong>The async client validates its API key with a blocking call in <code>__init__</code>.</strong> <code>AsyncMemoryClient._validate_api_key()</code> uses the synchronous <code>requests</code> library, called directly from the constructor, so building the async client performs one blocking network round-trip before any <code>await</code>; only later operations use the non-blocking <code>httpx.AsyncClient</code>. See <a href="client-sdk.html">the hosted client</a>.</li>
+  <li><strong>Endpoint paths straddle v1/v2/v3.</strong> Memory add/read/search use <code>/v3/</code>; per-ID ops, history, batch, exports, feedback, entity listing use <code>/v1/</code>; entity deletion uses <code>/v2/entities/</code>; project/webhook management uses <code>/api/v1/</code>. The option-model docstrings still say "v2 API" for search/get_all despite posting to v3. See <a href="client-sdk.html">the hosted client</a>.</li>
+  <li><strong><code>delete_linked</code> is the delete-side counterpart of <code>latest_only</code>.</strong> <code>delete(memory_id, delete_linked=True)</code> transitively removes the older memories a memory superseded (the v3 <code>linked_memory_ids</code> chain) so a superseded memory cannot resurface. It's normalized via <code>{'delete_linked': delete_linked or None}</code> so the param is omitted when False. See <a href="client-sdk.html">the hosted client</a>.</li>
+</ul>
+</section>
+
+<section id="security">
+<h2>Security surprises</h2>
+<p>Both the hardening that's quietly correct and the import-time footguns that aren't.</p>
+
+<aside class="callout security"><strong>Two packages can pip-install themselves at import time</strong> If <code>ollama</code> is missing, <code>mem0/embeddings/ollama.py</code> runs <code>input("…Install it now? [y/N]")</code> and shells out to <code>pip install ollama</code> at import. <code>mem0/proxy/main.py</code> does the same for <code>litellm</code> at module load, exiting the process on failure. In a non-interactive/locked-down server these block on stdin or install packages at runtime — surprising side effects for a bare import.</aside>
+
+<dl>
+  <dt><strong>Telemetry hashes identifiers and samples hot paths</strong></dt>
+  <dd><code>process_telemetry_filters</code> MD5-hashes <code>user_id</code>/<code>agent_id</code>/<code>run_id</code> into <code>encoded_ids</code> and reports only filter <em>key names</em>. Lifecycle events fire at 100%; hot-path events obey <code>MEM0_TELEMETRY_SAMPLE_RATE</code> (default 0.1, clamped to [0,1]). <code>MEM0_TELEMETRY=False</code> disables everything; <code>mark_aliased</code> stores an SHA-256 of <code>anon_id+email</code>, never the plaintext email. See <a href="memory-engine.html#telemetry">the engine</a>.</dd>
+
+  <dt><strong>At-most-one admin enforced at the DB layer</strong></dt>
+  <dd>Migration <code>004_unique_admin_role.py</code> adds a partial unique index on <code>users(role) WHERE role='admin'</code>. Combined with <code>register()</code>'s "registration closed once any user exists" guard and an <code>IntegrityError</code> rollback, the first registrant becomes the sole admin and the endpoint locks shut. See <a href="server.html#auth">the server</a>.</dd>
+
+  <dt><strong>Constant-time login to avoid email enumeration</strong></dt>
+  <dd><code>login()</code> calls <code>dummy_verify_password()</code> (<code>pwd_context.dummy_verify</code>) when the email is not found, burning the same bcrypt cycles as a real verify so response timing does not leak whether an account exists. See <a href="server.html#auth">the server</a>.</dd>
+
+  <dt><strong>SQL-injection-safe rich pgvector filter operators</strong></dt>
+  <dd><code>OPERATOR_SQL_MAP</code> + <code>_build_filter_conditions</code> compile <code>eq/ne/gt/gte/lt/lte/in/nin/contains/icontains</code> plus <code>$or/$not</code> and a <code>'*'</code> key-exists sentinel into parameterised SQL over the JSONB payload. <code>contains</code>/<code>icontains</code> escape backslash/<code>%</code>/underscore and add <code>ESCAPE '\'</code>. PR #5264 fixed boolean filter casing (<code>json.dumps</code> → <code>true/false</code> to match JSONB) and added LIKE wildcard escaping; earlier #4997 closed SQL injection via <code>psycopg.sql.Identifier</code> and bound params. See <a href="server.html">the server</a> and <a href="vector-stores.html">vector stores</a>.</dd>
+
+  <dt><strong>Upstream errors are classified by walking the exception chain</strong></dt>
+  <dd><code>errors.py _classify</code> walks <code>__cause__</code>/<code>__context__</code> so wrapped provider errors still map to stable codes (<code>provider_auth_failed</code>, <code>provider_rate_limited</code>, <code>vector_store_unavailable</code>, …), returning HTTP 502 with a <code>request_id</code> and no stack trace. See <a href="server.html#errors">the server</a>.</dd>
+
+  <dt><strong>LLMReranker prompt-injection hardening</strong></dt>
+  <dd>It truncates query and document to <code>_MAX_INPUT_LEN = 4000</code> chars and sends instructions as a <em>system</em> message with memory text in the <em>user</em> role, so stored text cannot override scoring instructions. See <a href="rerankers.html">rerankers</a>.</dd>
+</dl>
+
+<aside class="callout security"><strong>OpenMemory has no auth and open CORS by design</strong> <code>allow_origins=['*']</code>, no API keys, a single implicit user, and MCP identity carried only in the URL path (<code>/mcp/{client_name}/.../{user_id}</code>) — i.e. spoofable. Acceptable for a localhost single-user tool, unsafe for shared/networked hosting; use <code>server/</code> for that. Separately, <code>mem0 agent-rush</code> memories are <em>public</em> to other players — the CLI gates the first add on an explicit <code>y</code> and prints the PII warning to stderr for non-TTY agent runs. See <a href="openmemory.html">OpenMemory</a> and <a href="integrations.html">Integrations</a>.</aside>
+</section>
+
+<section id="deprecations-migrations">
+<h2>Deprecations &amp; migrations</h2>
+<p>Where the code disagrees with its own docs, and what to migrate away from.</p>
+
+<aside class="callout decision"><strong>Graph memory is removed, not just deprecated</strong> There is no <code>mem0/graphs/</code> directory, no <code>graph_memory.py</code>/<code>memgraph_memory.py</code>/<code>kuzu_memory.py</code>, no graph references in <code>mem0/memory/main.py</code>, no <code>graph_store</code> field on <code>MemoryConfig</code>, and no <code>graphs/</code> in the TS OSS tree. The <code>enable_graph</code>/<code>graph_store</code> (and <code>enableGraph</code>/<code>graphStore</code>) config keys are <em>silently ignored</em>, not honored. Relationship awareness is now a lazily-created <code>{collection}_entities</code> vector store via <code>VectorStoreFactory</code> plus spaCy/compromise NLP — verified by counting zero graph-store providers in <code>mem0/utils/factory.py</code>. See <a href="graph-memory.html">graph memory (deprecated)</a>.</aside>
+
+<h3>Graph-memory residue and naming traps</h3>
+<ul>
+  <li><strong>The <code>relations</code> field is a silent breaking change.</strong> <code>search()</code>/<code>get_all()</code> no longer populate the old <code>relations</code> key, and relationships are not exposed as a queryable graph. Apps that traversed triples directly have no drop-in equivalent. See <a href="graph-memory.html">graph memory</a>.</li>
+  <li><strong>Graph memory used to double LLM cost.</strong> A configured graph store ran a second LLM extraction pass per <code>add()</code> to mint triples (with a <code>ThreadPoolExecutor</code> fan-out). V3 entity extraction uses local spaCy NLP with zero extra LLM calls. See <a href="graph-memory.html">graph memory</a>.</li>
+  <li><strong>"Entity graph" is conceptual, not a graph DB.</strong> Prompts and the migration guide still say "entity graph boost" / "build a graph of related memories," but there is no graph database or traversal — only memory-to-memory links in payload fields scored at retrieval time. <code>sanitize_relationship_for_cypher()</code> and <code>remove_spaces_from_entities()</code> survive in <code>mem0/memory/utils.py</code> (and are tested), but <code>remove_spaces_from_entities</code> has no non-test caller — vestigial. See <a href="graph-memory.html">graph memory</a>.</li>
+  <li><strong>Neptune survives as a vector store, not a graph store.</strong> <code>mem0/vector_stores/neptune_analytics.py</code> remains as a vector index provider, distinct from the removed Neptune graph adapters. Same vendor, different feature. The self-hosted <code>server/docker-compose.yaml</code> defines only <code>mem0</code>, <code>postgres</code> (<code>ankane/pgvector</code>), and <code>mem0-dashboard</code> — no Neo4j/APOC. See <a href="graph-memory.html">graph memory</a> and <a href="server.html">the server</a>.</li>
+</ul>
+
+<h3>Dormant prompts &amp; config fields</h3>
+<ul>
+  <li><strong>Legacy two-call prompts still ship but are dormant.</strong> <code>prompts.py</code> still defines <code>FACT_RETRIEVAL_PROMPT</code>, <code>USER/AGENT_MEMORY_EXTRACTION_PROMPT</code>, <code>DEFAULT_UPDATE_MEMORY_PROMPT</code>, and <code>get_update_memory_messages</code> — referenced only by <code>memory/utils.py</code>, NOT wired into the active <code>_add_to_vector_store</code> path (which uses only <code>ADDITIVE_EXTRACTION_PROMPT</code>). <code>PROCEDURAL_MEMORY_SYSTEM_PROMPT</code> remains live. See <a href="memory-algorithm.html">the algorithm</a>.</li>
+  <li><strong><code>MemoryConfig</code> has <code>custom_instructions</code>, not <code>custom_fact_extraction_prompt</code>.</strong> There is no <code>custom_fact_extraction_prompt</code> or <code>custom_update_memory_prompt</code> field on <code>MemoryConfig</code>; the latter exists only as a parameter of the dormant <code>get_update_memory_messages()</code>. At <code>add()</code> time a per-call <code>prompt=</code> argument overrides it (<code>custom_instr = prompt or self.custom_instructions</code>). See <a href="config-system.html">the config system</a>.</li>
+</ul>
+
+<h3>Provider-level deprecations</h3>
+<ul>
+  <li><strong><code>OPENAI_API_BASE</code> is deprecated</strong> — <code>OpenAIEmbedding</code> emits a <code>DeprecationWarning</code>, slated for removal in 0.1.80; use <code>OPENAI_BASE_URL</code>. See <a href="embeddings.html">embeddings</a>.</li>
+  <li><strong><code>scoring_prompt</code> on <code>LLMRerankerConfig</code> is deprecated</strong> — if supplied it is now used as the system message and emits a warning; the built-in banded rubric prompt is preferred. See <a href="rerankers.html">rerankers</a>.</li>
+  <li><strong><code>get_project</code>/<code>update_project</code> are deprecated</strong> in favor of <code>client.project.get()/update()</code>, slated for removal in package v1.0; the surfaces aren't perfectly aligned (<code>memory_depth</code>/<code>usecase_setting</code> exist only on the legacy methods). See <a href="client-sdk.html">the hosted client</a>.</li>
+  <li><strong>Server <code>/search</code> deprecated top-level identifiers</strong> — PR #5263 stopped splatting the whole <code>SearchRequest</code> into <code>Memory.search()</code>; top-level <code>user_id</code>/<code>agent_id</code>/<code>run_id</code> are now merged into <code>filters</code> and only <code>top_k</code>/<code>threshold</code> forwarded, fixing a 502 when identifiers and filters were passed together. See <a href="server.html">the server</a>.</li>
+</ul>
+
+<details><summary>Deep dive: stale docs to ignore</summary>
+<ul>
+  <li><strong><code>AGENTS.md</code> provider counts are stale.</strong> It advertises 24 LLMs / 30 vector stores / 15 embeddings / 4 graph stores / 5 rerankers. Counting actual factory-registered modules in <code>mem0/utils/factory.py</code> (excluding base/configs/__init__/utils/mock) yields <strong>18 LLMs, 24 vector stores, 11 embeddings, 5 rerankers, and zero graph stores</strong>. See <a href="architecture.html">architecture</a>.</li>
+  <li><strong>The OSS TS README is stale.</strong> <code>src/oss/README.md</code> shows <code>import {`{ Memory }`} from "mem0-ts"</code> (wrong package name — it's <code>mem0ai/oss</code>), a legacy positional <code>add("text","user123")</code> signature, and advertises "Optional graph-based memory relationships" — none of which match the code. See <a href="typescript-sdk.html">the TypeScript SDK</a>.</li>
+  <li><strong>The CLI <code>[oss]</code> extra is unwired.</strong> <code>cli/python/pyproject.toml</code> declares <code>oss = ["mem0ai>=0.1.0"]</code> and help text advertises <code>--graph</code>, but <code>get_backend()</code> unconditionally returns <code>PlatformBackend</code>; there is no <code>OssBackend</code>, and <code>--graph</code> appears only in the static <code>_build_help_json()</code> dict, not on live commands. See <a href="integrations.html">Integrations</a>.</li>
+</ul>
+</details>
+</section>
+
+<section id="design-decisions">
+<h2>Design decisions</h2>
+<p>Deliberate structural choices that explain why the code is shaped the way it is.</p>
+
+<dl>
+  <dt><strong>One ADD-only LLM call replaces extract-then-diff</strong></dt>
+  <dd>The pre-v3 algorithm used two LLM calls (extract facts, then diff against existing state for ADD/UPDATE/DELETE/NONE). The April-2026 algorithm collapses this into a single ADD-only call with mechanical MD5 dedup. This is the root cause of nearly every "dead branch" gotcha above and the temporal-reasoning win. See <a href="memory-algorithm.html">the algorithm</a>.</dd>
+
+  <dt><strong>The factory's <code>provider_to_class</code> is the source of truth, not <code>__init__.py</code></strong></dt>
+  <dd>Category <code>__init__.py</code> registries are partial: <code>mem0/reranker/__init__.py</code> re-exports only 3 of 5 rerankers (the rest work via lazy dotted-path import), and <code>mem0/llms/__init__.py</code> is empty. To enumerate real support, read the factory dicts. Note also the directory/naming traps: the reranker dir is <code>mem0/reranker/</code> (singular) with <code>_reranker</code>-suffixed files, while its config classes live under <code>mem0/configs/rerankers/</code> (plural); factory keys are <code>llm_reranker</code> (not <code>llm</code>) and <code>sentence_transformer</code> (singular). See <a href="rerankers.html">rerankers</a> and <a href="config-system.html">the config system</a>.</dd>
+
+  <dt><strong>Asymmetric config wrappers: only <code>VectorStoreConfig</code> eagerly types its inner config</strong></dt>
+  <dd><code>LlmConfig</code> and <code>EmbedderConfig</code> keep their inner config as a raw dict (the validator only checks the provider name); <code>VectorStoreConfig</code>'s <code>@model_validator(mode='after')</code> immediately instantiates the typed provider config class. That's why the engine can read <code>self.config.vector_store.config.collection_name</code> as an attribute while LLM/embedder configs stay dicts until factory time. Consequence: dict-style and object-style configs are <em>not</em> perfectly interchangeable — the default <code>path=/tmp/{provider}</code> injection for file-backed stores only happens for dict configs. See <a href="config-system.html">the config system</a>.</dd>
+
+  <dt><strong><code>memory_action</code> is plumbed everywhere but only Vertex AI uses it</strong></dt>
+  <dd>The engine tags every <code>embed()</code> call with <code>add</code>/<code>search</code>/<code>update</code>, but of 11 providers only <code>VertexAIEmbedding</code> branches on it (RETRIEVAL_DOCUMENT vs RETRIEVAL_QUERY vs SEMANTIC_SIMILARITY). It's a forward-looking hook the other 10 accept and ignore. (And the abstract <code>embed()</code> declares <code>memory_action</code> as a required positional with no default — every concrete provider redeclares it as <code>=None</code>, so a custom subclass copying the base signature literally would break callers that omit it.) See <a href="embeddings.html">embeddings</a>.</dd>
+
+  <dt><strong>Two <code>*_structured</code> LLM providers, but only one truly parses</strong></dt>
+  <dd><code>OpenAIStructuredLLM</code> calls <code>client.beta.chat.completions.parse</code> for schema validation, but <code>AzureOpenAIStructuredLLM</code> still calls <code>chat.completions.create</code> — it's effectively a leaner copy of <code>AzureOpenAILLM</code>, not a real structured-parse path. See <a href="llms.html">LLM providers</a>.</dd>
+
+  <dt><strong>Entity store reuses the primary vector provider</strong></dt>
+  <dd><code>Memory.entity_store</code> lazily creates a <code>{collection}_entities</code> collection via the same <code>VectorStoreFactory</code> provider; for embedded Qdrant it reuses the existing client object rather than opening a second connection, specifically to avoid RocksDB lock contention on the same on-disk path. No separate database is configured. See <a href="memory-engine.html">the engine</a> and <a href="graph-memory.html">graph memory</a>.</dd>
+
+  <dt><strong>History migration is lossy by design</strong></dt>
+  <dd><code>_migrate_history_table</code> renames the old table, recreates the new schema, and copies only the intersection of old and new columns inside one transaction — legacy group-chat columns are dropped and new columns left NULL. See <a href="memory-engine.html">the engine</a>.</dd>
+
+  <dt><strong>No <code>AsyncMemory</code>/<code>AsyncMemoryClient</code> in TypeScript</strong></dt>
+  <dd>Python duplicates every method into sync and async classes; the TS SDK has exactly one <code>Memory</code> and one <code>MemoryClient</code> because all methods already return Promises — a structural divergence, not a feature gap. TS heavy deps are all external peer dependencies (guarded by <code>tsup-externals.test.ts</code>) imported lazily; <code>compromise</code> NLP is optional with a pure-regex fallback. See <a href="typescript-sdk.html">the TypeScript SDK</a>.</dd>
+
+  <dt><strong>Proxy writes are fire-and-forget on a daemon thread</strong></dt>
+  <dd><code>Completions._async_add_to_memory</code> spawns a daemon thread calling <code>mem0_client.add(...)</code>, so a slow/failed write never blocks the chat response — but failures are silent, and a memory written this turn is not guaranteed searchable on the immediate next turn. <code>org_id</code>/<code>project_id</code> are resolved server-side from the API key (via <code>/v1/ping/</code>) and intentionally never injected into memory params. See <a href="client-sdk.html">the hosted client</a>.</dd>
+
+  <dt><strong>Self-hosted runtime config persists to DB and layers over <code>.env</code></strong></dt>
+  <dd><code>server_state.py</code> keeps a single process-global <code>Memory</code> behind an <code>RLock</code>; <code>POST /configure</code> deep-merges and upserts overrides into a <code>settings</code> table. On restart, persisted overrides re-apply on top of <code>.env</code>-derived defaults — but a bundled-provider allowlist (<code>BUNDLED_LLM_PROVIDERS</code>, <code>BUNDLED_EMBEDDER_PROVIDERS</code>) returns 400 for providers whose package isn't in the image. See <a href="server.html">the server</a>.</dd>
+</dl>
+
+<aside class="callout insight"><strong>The "Proof-Editor honesty" pattern in Agent Mode</strong> <code>agent_detect.detect_agent_caller()</code> recognises <code>CLAUDECODE</code>/<code>CURSOR_AGENT</code>/<code>CODEX_CLI</code> env vars only as a <em>context trigger</em> to enable auto-bootstrap; the canonical <code>agent_caller</code> identity is always self-declared via <code>--agent-caller</code> or <code>mem0 identify</code>, never sniffed from env. Likewise <code>plugin_sync</code> only edits existing config entries via atomic tmp+rename and never creates new ones — deliberately conservative about clobbering unrelated config. See <a href="integrations.html">Integrations</a>.</aside>
+</section>

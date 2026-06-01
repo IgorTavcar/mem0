@@ -1,0 +1,180 @@
+<h1>Graph Memory (deprecated)</h1>
+<p class="lead">Graph Memory was an optional, relationship-aware retrieval layer that layered a property graph (Neo4j, Memgraph, Kuzu, Apache AGE, or Amazon Neptune) on top of mem0's vector store. It has been <strong>removed entirely</strong> from both the Python OSS package and the TypeScript OSS package in the v3 rewrite. Its job — surfacing memories connected through shared entities — is now handled natively by <a href="memory-algorithm.html#entity-linking">entity linking</a>, a parallel vector collection plus a retrieval-time score boost that needs no external graph database. This page records what graph memory was, why it was dropped, what code (if any) survives, and how to migrate.</p>
+
+<aside class="callout decision"><strong>Status: REMOVED, not merely deprecated.</strong> As of the v3 pipeline, there is no <code>mem0/graphs/</code> directory, no <code>graph_memory.py</code>, no graph references in <code>mem0/memory/main.py</code>, and no <code>mem0-ts/src/oss/src/graphs/</code>. The config flags <code>enable_graph</code> / <code>enableGraph</code> and the <code>graph_store</code> / <code>graphStore</code> block are gone and are no longer read. Removal was finalized in commit <code>59880a6f</code> ("feat: TS SDK v3 port, graph store removal, client v3 API migration") and the docs were cleaned up in <code>eaca45dc</code> ("docs: remove deprecated Graph Memory references #5277").</aside>
+
+<section id="verification">
+<h2>Verification: what no longer exists</h2>
+<p>Every removal claim below was checked against the working tree at the time of writing, not against documentation.</p>
+<dl>
+<dt>No graphs package (Python)</dt>
+<dd><code>ls mem0/graphs/</code> returns "No such file or directory". The whole subtree — <code>mem0/graphs/__init__.py</code>, <code>configs.py</code>, <code>tools.py</code>, <code>utils.py</code>, and <code>mem0/graphs/neptune/</code> — is gone. So are the per-backend memory adapters <code>mem0/memory/graph_memory.py</code>, <code>mem0/memory/memgraph_memory.py</code>, and <code>mem0/memory/kuzu_memory.py</code> (13 graph-related <code>.py</code> files removed in total).</dd>
+<dt>No graph wiring in the engine</dt>
+<dd><code>grep -i graph mem0/memory/main.py</code> returns nothing. The <a href="memory-engine.html">Memory engine</a> no longer constructs a <code>self.graph</code> attribute, no longer branches on <code>self.config.graph_store.config</code>, and add/search results no longer contain a <code>"relations"</code> key.</dd>
+<dt>No graphs package (TypeScript)</dt>
+<dd><code>mem0-ts/src/oss/src/graphs/</code> does not exist; <code>mem0-ts/src/oss/src/memory/graph_memory.ts</code> was deleted. The <a href="typescript-sdk.html">TypeScript OSS Memory</a> class has no graph code path. Six graph-related <code>.ts</code> files were removed.</dd>
+<dt>No graph database service</dt>
+<dd>Neither <code>server/docker-compose.yaml</code> (the <a href="server.html">self-hosted server</a>) nor <code>openmemory/docker-compose.yml</code> (the <a href="openmemory.html">OpenMemory platform</a>) declares a Neo4j, Memgraph, Kuzu, or Apache AGE service. There is no shipped graph backend to point at.</dd>
+<dt>No graph feature page in docs</dt>
+<dd><code>docs/open-source/features/graph-memory.mdx</code> was deleted. The old documentation routes (e.g. <code>/open-source/graph_memory/overview</code>, <code>/platform/features/graph-memory</code>, <code>/features/graph-memory</code>) now exist only as redirects in <code>docs/docs.json</code>, all pointing at <code>/migration/oss-v2-to-v3</code>.</dd>
+</dl>
+</section>
+
+<section id="what-it-was">
+<h2>What graph memory was</h2>
+<p>Graph memory ran <em>alongside</em> vector storage: every <code>add()</code> extracted entity–relationship–entity triples via the LLM and wrote them into a property graph, and every <code>search()</code> / <code>get_all()</code> could optionally return those relationships in a <code>relations</code> field next to the vector hits.</p>
+
+<h3 id="config-shape">Configuration shape (historical)</h3>
+<p>It was opt-in through a <code>graph_store</code> section on <code>MemoryConfig</code> (in the old <code>mem0/configs/base.py</code>) plus a runtime <code>enable_graph</code> flag. The config validated into one of five backend configs:</p>
+<pre><code class="language-python"># HISTORICAL — removed. Old mem0/graphs/configs.py
+class GraphStoreConfig(BaseModel):
+    provider: str = "rock_db"  # one of: neo4j | memgraph | neptune | kuzu | apache_age
+    config: Union[Neo4jConfig, MemgraphConfig, NeptuneConfig,
+                  KuzuConfig, ApacheAgeConfig]
+    # validator dispatched on provider -> concrete config class</code></pre>
+<aside class="callout gotcha"><strong>Do not write this today.</strong> The snippet above reflects pre-v3 code recovered from git history (commit <code>59880a6f^</code>). Supplying <code>graph_store</code> or <code>enable_graph</code> to current mem0 has no effect — the keys are silently unused, not honored.</aside>
+
+<h3 id="backends">Supported backends (historical)</h3>
+<table>
+<thead><tr><th>Backend</th><th>Old config class</th><th>Query language / notes</th></tr></thead>
+<tbody>
+<tr><td>Neo4j</td><td><code>Neo4jConfig</code></td><td>Cypher; relationships sanitized for Cypher safety</td></tr>
+<tr><td>Memgraph</td><td><code>MemgraphConfig</code></td><td>Cypher-compatible; same sanitization path as Neo4j</td></tr>
+<tr><td>Kuzu</td><td><code>KuzuConfig</code></td><td>Embedded; default db <code>:memory:</code>; plain (non-Cypher) relationship normalization</td></tr>
+<tr><td>Apache AGE</td><td><code>ApacheAgeConfig</code></td><td>Postgres extension; default graph name <code>mem0_graph</code> (added in <code>305ce7b6</code>)</td></tr>
+<tr><td>Amazon Neptune</td><td><code>NeptuneConfig</code></td><td>Neptune-DB cluster (<code>neptune-db://</code>) or Neptune Analytics (<code>neptune-graph://</code>); adapters under <code>mem0/graphs/neptune/</code></td></tr>
+</tbody>
+</table>
+
+<h3 id="old-flow">How it ran inside the engine (historical)</h3>
+<p>When a graph store was configured, the old <code>Memory.add()</code> ran the vector write and the graph write concurrently in a <code>ThreadPoolExecutor</code>, then merged the two outputs into a single dict with <code>results</code> and <code>relations</code> keys. Search and get_all did the same fan-out, submitting <code>self.graph.search(...)</code> / <code>self.graph.get_all(...)</code> alongside the vector query.</p>
+<pre class="mermaid">flowchart LR
+  A["add(messages)"] --> B{graph store configured?}
+  B -- yes --> C[ThreadPoolExecutor]
+  C --> D[vector store insert]
+  C --> E["graph.add: extract triples, upsert nodes/edges"]
+  D --> F["merge -> results + relations"]
+  E --> F
+  B -- no --> G[vector store insert only]
+  classDef gone fill:#fdd,stroke:#c00;
+  class C,E,F gone</pre>
+<aside class="callout perf"><strong>The concurrency itself hinted at the cost.</strong> Commit <code>a6130c54</code> ("perf: skip ThreadPoolExecutor when graph store is disabled") exists precisely because the graph path added LLM calls and thread overhead. The graph write needed its own LLM extraction pass on top of the vector pass — roughly doubling token spend per <code>add()</code> when enabled.</aside>
+
+<details><summary>Deep dive: the relationship lifecycle bugs that accumulated</summary>
+<p>The git history shows graph memory needing repeated correctness fixes as it matured — a signal of inherent complexity:</p>
+<ul>
+<li><code>884e740b</code> — soft-delete relationships instead of hard <code>DELETE</code>.</li>
+<li><code>53327419</code> — clean up graph store data on <code>Memory.delete()</code> (#4505).</li>
+<li><code>7213e1b1</code> — reset graph database in <code>Memory.reset()</code> (#4185).</li>
+<li><code>06c25eb0</code> — use the root LLM config as the graph-store LLM fallback instead of a hardcoded OpenAI default (#4466).</li>
+<li><code>e95090e1</code> — add a missing <code>json</code> keyword to graph prompts (#4249).</li>
+<li><code>72e2c5c2</code> — handle malformed entity dicts and <code>None</code> LLM responses in <code>memgraph_memory</code>.</li>
+</ul>
+<p>Each fix kept three or four backend adapters in sync — the maintenance surface that v3 retired.</p>
+</details>
+</section>
+
+<section id="why-removed">
+<h2>Why it was removed</h2>
+<p>The single-pass extraction + entity-linking design of <a href="memory-algorithm.html">the v3 algorithm</a> recovers the practical benefit of graph memory — pulling in memories connected through shared people, places, and things — at a fraction of the cost and with zero external infrastructure.</p>
+<dl>
+<dt>Relationship retrieval was subsumed, not lost</dt>
+<dd>The value users got from a graph was mostly "when I ask about X, also surface memories about entities related to X." V3 achieves this with an <strong>entity boost</strong> folded into the fused retrieval score (see <a href="memory-algorithm.html#multi-signal-retrieval">score fusion</a>), not a graph traversal. Entities extracted from the query match entities indexed against stored memories, and matching memories get a ranking bump.</dd>
+<dt>Cost</dt>
+<dd>A configured graph store meant a second LLM extraction pass on every <code>add()</code> to mint triples. V3's entity extraction uses local spaCy NLP (<code>mem0/utils/entity_extraction.py</code>) — no LLM call, no tokens.</dd>
+<dt>Operational simplicity</dt>
+<dd>Graph memory required running and credentialing a separate database (Neo4j/Memgraph/etc.). Entity linking lives inside the vector store you already configured (see <a href="vector-stores.html">vector stores</a>), as a sibling collection.</dd>
+<dt>Maintenance burden</dt>
+<dd>Five backends, each with its own Cypher/SQL dialect quirks and lifecycle edge cases (see the deep dive above), against one shared entity-linking code path.</dd>
+<dt>Measured wins justified the swap</dt>
+<dd>Per the README, v3 reports 91.6 on LoCoMo (+20 over the previous algorithm) and 94.8 on LongMemEval (+27) with single-pass retrieval — these gains came from the new pipeline, not from a graph layer. See <a href="evaluation.html">Evaluation &amp; Benchmarks</a>.</dd>
+</dl>
+<aside class="callout insight"><strong>Naming legacy.</strong> The v3 entity boost is still nicknamed an "entity graph boost" in <code>docs/migration/oss-v2-to-v3.mdx</code> and the prompt text in <code>mem0/configs/prompts.py</code> still describes building "a graph of related memories." That language is conceptual — there is no graph database and no graph traversal behind it. It refers to memory-to-memory links carried in payload fields, scored at retrieval time.</aside>
+</section>
+
+<section id="replacement">
+<h2>The replacement: entity linking</h2>
+<p>Entity linking is not a graph store with a new name — it is a second vector-store collection plus a retrieval boost, implemented entirely inside <code>mem0/memory/main.py</code>.</p>
+
+<h3 id="entity-store">The entity store</h3>
+<p>The <code>Memory.entity_store</code> property lazily creates a parallel collection named <code>{collection_name}_entities</code> using the <em>same</em> vector store provider via <code>VectorStoreFactory.create(...)</code>. There is no separate provider to configure.</p>
+<pre><code class="language-python"># mem0/memory/main.py  (current)
+@property
+def entity_store(self):
+    if self._entity_store is None:
+        entity_config = _safe_deepcopy_config(self.config.vector_store.config)
+        entity_collection = f"{self.collection_name}_entities"
+        # set collection_name on the cloned config ...
+        # Qdrant: reuse the existing client to avoid embedded RocksDB lock contention
+        self._entity_store = VectorStoreFactory.create(
+            self.config.vector_store.provider, entity_config)
+    return self._entity_store</code></pre>
+<p>On <code>add()</code>, <code>_upsert_entity()</code> embeds each extracted entity, searches the entity collection for an existing match, and either appends the new <code>memory_id</code> to that entity's <code>linked_memory_ids</code> payload (when similarity ≥ 0.95) or inserts a fresh entity record. On delete, <code>_remove_memory_from_entity_store()</code> strips the id from every entity scoped to the same session and deletes entity records that become orphaned.</p>
+<aside class="callout decision"><strong>Same store, sibling collection.</strong> Because the entity store reuses the configured vector provider, "the database" you operate is unchanged. Compare this to graph memory, which demanded a wholly separate engine. The only operational note (from the migration guide): the vector store credentials must be allowed to create a new collection, or you must pre-create <code>{collection}_entities</code> with matching embedding dimensions.</aside>
+
+<h3 id="retrieval-boost">Retrieval boost</h3>
+<p>At search time, entities are extracted from the query and matched against the entity collection (<code>entity_store.search_batch(...)</code>), producing per-memory boosts. <code>mem0/utils/scoring.py</code> fuses three signals — semantic similarity, BM25 keyword score, and the entity boost (<code>ENTITY_BOOST_WEIGHT = 0.5</code>) — into one combined <code>score</code>. The fusion adapts to which signals are available (semantic-only, semantic+BM25, or all three when spaCy and the entity store are active). Crucially, BM25 and entity scores only <em>re-rank</em> semantic candidates; they do not expand recall.</p>
+<pre class="mermaid">flowchart LR
+  Q[query] --> P[preprocess: lemmatize + extract entities]
+  P --> S1[semantic vector search]
+  P --> S2[BM25 keyword score]
+  P --> S3["entity match vs entities collection"]
+  S1 --> F["score fusion -> combined score"]
+  S2 --> F
+  S3 --> F
+  F --> K[top-K]</pre>
+<p>For the full pipeline including temporal reasoning and the ADD-only extraction prompts, see <a href="memory-algorithm.html">Memory Algorithm</a> and the end-to-end traces in <a href="data-flow.html">Data Flow</a>.</p>
+</section>
+
+<section id="surviving-references">
+<h2>Surviving graph references (and what they mean)</h2>
+<p>A few graph-flavored strings remain in the tree. None of them is a live graph store; they are vestigial or repurposed.</p>
+<dl>
+<dt><code>mem0/memory/utils.py</code> — Cypher helpers</dt>
+<dd><code>sanitize_relationship_for_cypher()</code> and <code>remove_spaces_from_entities(..., sanitize_relationship=...)</code> still exist and are exercised by <code>tests/memory/test_memory_utils.py</code>, whose docstrings reference "Neo4j / Memgraph (sanitize=True)" and "Kuzu / Neptune (sanitize=False)" paths. <strong>However, no non-test caller in <code>mem0/</code> invokes <code>remove_spaces_from_entities</code></strong> — its only in-package caller is itself. These are effectively dead/legacy utilities retained with tests; they are not wired into any current backend.</dd>
+<dt><code>mem0/exceptions.py</code> — <code>kuzu</code> in a docstring</dt>
+<dd><code>DependencyError</code>'s example mentions <code>details={"package": "kuzu", "feature": "graph_store"}</code>. This is documentation text inside a docstring, not active code.</dd>
+<dt><code>mem0/configs/prompts.py</code> — "graph of related memories"</dt>
+<dd>Conceptual wording for entity linking, as noted above. No graph DB involved.</dd>
+<dt><code>mem0/vector_stores/neptune_analytics.py</code> + <code>mem0/configs/vector_stores/neptune.py</code></dt>
+<dd>Neptune Analytics survives as a <em>vector store</em> provider, distinct from the removed Neptune <em>graph</em> adapters that lived under <code>mem0/graphs/neptune/</code>. See <a href="vector-stores.html">Vector Stores</a> — this is a vector index, not relationship storage.</dd>
+<dt><code>docs/integrations/langgraph.mdx</code> and similar</dt>
+<dd>"LangGraph" is an unrelated LangChain orchestration library; matches on the substring "graph" are coincidental and not about mem0 graph memory.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Do not mistake Neptune Analytics for graph memory.</strong> The vector_stores Neptune Analytics provider stores embeddings and answers vector queries. The removed <code>mem0/graphs/neptune/</code> adapters stored entity triples. Same vendor, different feature — only the vector-store side remains.</aside>
+</section>
+
+<section id="migration">
+<h2>Migrating off graph memory</h2>
+<p>The canonical guide is <code>docs/migration/oss-v2-to-v3.mdx</code> (linked from the README as <em>oss-v2-to-v3</em>), which has a dedicated "Graph Memory → Entity Linking" section. The essentials:</p>
+<ul>
+<li><strong>Remove</strong> <code>enable_graph</code> / <code>enableGraph</code> from your config.</li>
+<li><strong>Remove</strong> the <code>graph_store</code> / <code>graphStore</code> block — it is no longer read.</li>
+<li><strong>Uninstall</strong> graph drivers (<code>neo4j</code>, <code>memgraph</code>, etc.) if you installed them only for mem0.</li>
+<li><strong>No data migration</strong> is required. Entity linking activates automatically on the next <code>add()</code> call, populating <code>{collection}_entities</code> on first use.</li>
+<li><strong>Client SDK callers:</strong> <code>enable_graph</code> / <code>enableGraph</code> was also removed from <code>add()</code>, <code>search()</code>, <code>get_all()</code>, and <code>project.update()</code> on the hosted <a href="client-sdk.html">MemoryClient</a> (commit <code>9d6b79a1</code>; org/project options dropped in <code>88f696a6</code>).</li>
+</ul>
+<aside class="callout security"><strong>Breaking: the <code>relations</code> field is gone.</strong> Search and get_all results no longer populate the old <code>relations</code> key. Entity relationships are consumed indirectly through retrieval ranking — they are <em>not</em> exposed as a queryable graph structure. Any application that traversed graph relationships directly must be redesigned against the new API; there is no drop-in equivalent that returns triples.</aside>
+
+<details><summary>Deep dive: before / after config</summary>
+<pre><code class="language-python"># BEFORE (v2, removed)
+config = {
+    "graph_store": {
+        "provider": "neo4j",
+        "config": {"url": "...", "username": "...", "password": "..."},
+    },
+    "enable_graph": True,
+}
+# AFTER (v3)
+config = {
+    "vector_store": {"provider": "qdrant", "config": {...}},
+    # no graph_store, no enable_graph.
+    # entity linking is automatic; {collection}_entities is created on first add().
+}</code></pre>
+</details>
+</section>
+
+<section id="cross-cutting">
+<h2>Where this fits</h2>
+<p>Graph memory's removal is one of the headline deltas of the v3 rewrite; it is also catalogued among the repo-wide <a href="surprises.html">Surprises &amp; Gotchas</a> and indexed in the <a href="glossary.html">Glossary</a>. Its functional replacement is described in <a href="memory-algorithm.html#entity-linking">the algorithm page</a>; the data plane it now rides on is covered in <a href="vector-stores.html">Vector Stores</a>; and the overall config-driven wiring (with the old <code>graph_store</code> section now absent) is in <a href="config-system.html">Configuration System</a> and <a href="architecture.html">Architecture Overview</a>.</p>
+</section>

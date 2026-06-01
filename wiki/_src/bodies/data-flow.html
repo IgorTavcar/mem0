@@ -1,0 +1,263 @@
+<h1>Data Flow</h1>
+<p class="lead">This page traces the two hot paths through the mem0 engine end to end: <code>add()</code>, which turns raw messages into stored facts via a single LLM extraction call plus a phased batch persistence pipeline, and <code>search()</code>, which fuses semantic similarity, BM25 keyword matching, and entity boosts into a single ranked result set. Both paths live in <code>mem0/memory/main.py</code> and exist in mirrored sync (<code>Memory</code>) and async (<code>AsyncMemory</code>) implementations; the async variant differs only in that every blocking call is wrapped in <code>asyncio.to_thread</code>. See <a href="memory-engine.html">the Memory Engine page</a> for class internals and <a href="memory-algorithm.html">the Memory Algorithm page</a> for the extraction prompt and scoring math.</p>
+
+<section id="overview">
+<h2>Overview &amp; orientation</h2>
+<p>Everything funnels through <code>Memory._add_to_vector_store()</code> and <code>Memory._search_vector_store()</code>. The public methods (<code>add</code>, <code>search</code>, <code>get</code>, <code>get_all</code>, <code>update</code>, <code>delete</code>, <code>delete_all</code>, <code>history</code>) are thin wrappers that validate inputs, build filters, emit telemetry, and delegate.</p>
+<dl>
+<dt>Three persistence stores</dt>
+<dd>The <strong>vector store</strong> (memories), a sibling <strong>entity store</strong> (a second collection named <code>{collection_name}_entities</code>), and the <strong>SQLite</strong> database (<code>history</code> + <code>messages</code> tables via <code>mem0/memory/storage.py</code>). See <a href="vector-stores.html">vector stores</a> and <a href="memory-engine.html#sqlite-history">the engine's history section</a>.</dd>
+<dt>Session scoping</dt>
+<dd>Every operation requires at least one of <code>user_id</code>, <code>agent_id</code>, <code>run_id</code> (validated by <code>_build_filters_and_metadata</code> / <code>_validate_and_trim_entity_id</code>). These are passed via <code>filters=</code> on read paths — top-level entity kwargs are rejected by <code>_reject_top_level_entity_params</code>. See <a href="config-system.html">configuration</a>.</dd>
+<dt>Telemetry</dt>
+<dd>Every public method calls <code>capture_event(...)</code> with a <code>sync_type</code> of <code>"sync"</code> or <code>"async"</code>. IDs are hashed via <code>process_telemetry_filters</code> before transmission. See <a href="surprises.html">surprises</a> and <a href="memory-engine.html#telemetry">the engine page</a>.</dd>
+</dl>
+<aside class="callout insight"><strong>Insight</strong> The Apr-2026 algorithm is <em>ADD-only</em>: the extraction LLM call never emits UPDATE or DELETE operations on the add path. Deduplication is handled mechanically by MD5 hashing and by passing existing memories to the LLM as a "do not re-extract" reference. UPDATE/DELETE only happen when a caller invokes <code>update()</code>/<code>delete()</code> directly. This is a deliberate departure from the older "fact + memory-decision two-pass" design. See <a href="memory-algorithm.html#single-pass-add">the algorithm page</a>.</aside>
+</section>
+
+<section id="add-path">
+<h2>The add() path</h2>
+<p class="lead"><code>add()</code> normalizes input, optionally parses vision content, then dispatches to <code>_add_to_vector_store()</code> which has two branches: a raw fast path (<code>infer=False</code>) and the full V3 phased batch pipeline (<code>infer=True</code>, the default).</p>
+
+<h3 id="add-entry">Entry &amp; normalization</h3>
+<p><code>Memory.add(messages, *, user_id, agent_id, run_id, metadata, infer=True, memory_type, prompt)</code> performs, in order:</p>
+<ul>
+<li><code>_build_filters_and_metadata(...)</code> → returns <code>(processed_metadata, effective_filters)</code>; raises <code>Mem0ValidationError</code> (code <code>VALIDATION_001</code>) if no session id is provided.</li>
+<li>Validates <code>memory_type</code>: only <code>MemoryType.PROCEDURAL.value</code> ("procedural_memory") is accepted besides <code>None</code>.</li>
+<li>Coerces <code>messages</code>: a <code>str</code> becomes <code>[{"role": "user", "content": ...}]</code>; a <code>dict</code> becomes a one-element list; anything else raises <code>VALIDATION_003</code>.</li>
+<li>If <code>agent_id</code> is set and <code>memory_type == "procedural_memory"</code>, routes to <code>_create_procedural_memory()</code> (a single LLM summary, stored verbatim) and returns early.</li>
+<li>Runs <code>parse_vision_messages(...)</code> — when <code>config.llm.config["enable_vision"]</code> is set, image URLs are described by the LLM first; otherwise it just passes messages through.</li>
+<li>Calls <code>_add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=...)</code> and wraps the result as <code>{"results": [...]}</code>.</li>
+</ul>
+
+<h3 id="add-infer-false">The infer=False fast path</h3>
+<p>When <code>infer=False</code>, <strong>no LLM is called and no entities are extracted</strong>. Each message is stored verbatim as its own memory:</p>
+<ul>
+<li>Messages with missing <code>role</code>/<code>content</code> are skipped with a warning; <code>role == "system"</code> messages are dropped.</li>
+<li>Per-message metadata copies the template, sets <code>role</code>, and promotes a message's <code>name</code> field to <code>actor_id</code>.</li>
+<li>Each content string is embedded (<code>embedding_model.embed(content, "add")</code>) and persisted via <code>_create_memory(...)</code>, which assigns a UUID, computes the MD5 <code>hash</code>, sets <code>created_at</code>/<code>updated_at</code>, lemmatizes into <code>text_lemmatized</code>, upserts the vector, and writes a single <code>ADD</code> history row.</li>
+<li>Returns one result dict per message including <code>actor_id</code> and <code>role</code>.</li>
+</ul>
+<aside class="callout perf"><strong>Perf</strong> The fast path skips the existing-memory search, the extraction LLM call, hash dedup against existing memories, batch embedding, and entity linking. It is the right choice when the caller already has clean atomic facts (e.g. an ETL job) and wants to avoid LLM latency and cost entirely.</aside>
+
+<h3 id="add-pipeline">The infer=True V3 phased batch pipeline</h3>
+<p>The default path is organized into numbered phases inside <code>_add_to_vector_store()</code>. A single LLM call does all the reasoning; everything else is mechanical batching.</p>
+<dl>
+<dt>Phase 0 — Context gathering</dt>
+<dd><code>session_scope = _build_session_scope(filters)</code> (a deterministic sorted string like <code>user_id=u1&amp;run_id=r1</code>). <code>db.get_last_messages(session_scope, limit=10)</code> pulls the last 10 raw turns from the SQLite <code>messages</code> table; <code>parse_messages(messages)</code> flattens the new turns into a string.</dd>
+<dt>Phase 1 — Existing-memory retrieval</dt>
+<dd>The parsed messages are embedded with action <code>"search"</code> and a <code>vector_store.search(top_k=10, filters=search_filters)</code> finds up to 10 related existing memories. Their UUIDs are mapped to sequential integer string ids ("0", "1", ...) in <code>uuid_mapping</code> — an anti-hallucination measure so the LLM references short ids, never raw UUIDs.</dd>
+<dt>Phase 2 — Single LLM extraction call</dt>
+<dd>System prompt is <code>ADDITIVE_EXTRACTION_PROMPT</code>; if the session is agent-scoped (<code>agent_id</code> present and no <code>user_id</code>), <code>AGENT_CONTEXT_SUFFIX</code> is appended. The user prompt is built by <code>generate_additive_extraction_prompt(existing_memories, new_messages, last_k_messages, custom_instructions)</code>. The call requests <code>response_format={"type": "json_object"}</code>. On any exception the whole add returns <code>[]</code>. The response is cleaned with <code>remove_code_blocks</code> and parsed; if <code>json.loads</code> fails it falls back to <code>extract_json</code>. Extracted items live under the <code>"memory"</code> key, each <code>{"text": ..., "attributed_to": ...}</code>.</dd>
+<dt>Phase 3 — Batch embed extracted texts</dt>
+<dd>All non-empty <code>text</code> fields are embedded in one <code>embedding_model.embed_batch(mem_texts, "add")</code> call, producing <code>embed_map: text → vector</code>. On failure it falls back to per-text <code>embed()</code>.</dd>
+<dt>Phase 4/5 — CPU processing + hash dedup</dt>
+<dd>For each extracted memory: compute <code>md5(text)</code>. Skip if the hash already exists in the Phase-1 results (<code>existing_hashes</code>) or earlier in this batch (<code>seen_hashes</code>). Survivors get a UUID, a metadata dict carrying <code>data</code>, <code>text_lemmatized</code> (<code>lemmatize_for_bm25</code>), <code>hash</code>, <code>created_at</code>/<code>updated_at</code>, and optionally <code>attributed_to</code>. Records accumulate as <code>(memory_id, text, embedding, payload)</code> tuples.</dd>
+<dt>Phase 6 — Batch persist (vector + history)</dt>
+<dd>One <code>vector_store.insert(vectors, ids, payloads)</code> call (falling back to per-record insert on error). Then one <code>db.batch_add_history(records)</code> writing all <code>ADD</code> rows in a single SQLite transaction (falling back to per-row <code>add_history</code>).</dd>
+<dt>Phase 7 — Batch entity linking</dt>
+<dd><code>extract_entities_batch(all_texts)</code> (spaCy <code>nlp.pipe</code>) yields entities per memory. Entities are globally deduplicated by lowercased text (7a), batch-embedded once (7b), batch-searched against the entity store via <code>entity_store.search_batch(top_k=1)</code> (7c), then split (7d): matches with <code>score &gt;= 0.95</code> get their <code>linked_memory_ids</code> union-updated; the rest are collected and inserted in one <code>entity_store.insert(...)</code> (7e). The whole phase is wrapped in try/except and is non-fatal — a linking failure never breaks the add.</dd>
+<dt>Phase 8 — Persist raw messages + telemetry</dt>
+<dd><code>db.save_messages(messages, session_scope)</code> stores the raw turns (evicting all but the most recent 10 for the scope), then <code>capture_event("mem0.add", ...)</code> fires. Returns <code>[{"id", "memory", "event": "ADD"}, ...]</code>.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Gotcha</strong> If the LLM extracts nothing, or every extraction is a hash duplicate, the pipeline still calls <code>db.save_messages(...)</code> and returns <code>[]</code> — so the conversation context is preserved for the next turn even when no new facts were stored. The early returns at "no extracted memories" and "no records" both do this.</aside>
+<aside class="callout decision"><strong>Decision</strong> Lemmatized text is stored at write time (<code>text_lemmatized</code> in the payload) so that BM25/keyword search at query time can match against pre-normalized tokens without re-running spaCy over the whole corpus. See <a href="#search-preprocess">query preprocessing</a> and <a href="memory-algorithm.html#multi-signal-retrieval">the algorithm page</a>.</aside>
+
+<h3 id="add-sequence">ADD sequence diagram</h3>
+<pre class="mermaid">sequenceDiagram
+    participant Caller
+    participant Memory as Memory.add
+    participant AVS as _add_to_vector_store
+    participant Emb as Embedder
+    participant LLM
+    participant VS as VectorStore
+    participant ES as EntityStore
+    participant DB as SQLite
+    participant Tel as Telemetry
+
+    Caller->>Memory: add(messages, filters, infer=True)
+    Memory->>Memory: _build_filters_and_metadata
+    Memory->>Memory: parse_vision_messages
+    Memory->>AVS: _add_to_vector_store(...)
+
+    alt infer == False (fast path)
+        loop each non-system message
+            AVS->>Emb: embed(content, "add")
+            AVS->>VS: insert one vector
+            AVS->>DB: add_history ADD
+        end
+        AVS-->>Memory: results
+    else infer == True (V3 pipeline)
+        AVS->>DB: get_last_messages(scope, 10)
+        AVS->>Emb: embed(parsed_messages, "search")
+        AVS->>VS: search top_k=10 existing
+        Note over AVS: map UUIDs to ids 0..9
+        AVS->>LLM: generate_response ADDITIVE_EXTRACTION_PROMPT json_object
+        LLM-->>AVS: memory[] text + attributed_to
+        AVS->>Emb: embed_batch(extracted texts, "add")
+        Note over AVS: md5 dedup vs existing and within batch
+        AVS->>VS: insert(vectors, ids, payloads) batch
+        AVS->>DB: batch_add_history ADD
+        AVS->>ES: search_batch then insert linked entities
+        AVS->>DB: save_messages(scope)
+        AVS->>Tel: capture_event mem0.add
+        AVS-->>Memory: results
+    end
+    Memory-->>Caller: results
+</pre>
+
+<details>
+<summary>Deep dive: AsyncMemory differences on the add path</summary>
+<p><code>AsyncMemory._add_to_vector_store</code> is a line-for-line mirror with every blocking call wrapped in <code>asyncio.to_thread(...)</code>: <code>get_last_messages</code>, <code>embedding_model.embed</code>, <code>vector_store.search</code>, <code>llm.generate_response</code>, <code>embedding_model.embed_batch</code>, <code>vector_store.insert</code>, <code>db.batch_add_history</code>, <code>extract_entities_batch</code>, <code>entity_store.search_batch</code>, <code>entity_store.insert</code>, and <code>db.save_messages</code> all run on the default thread-pool executor. The phases stay <strong>sequential</strong> (each <code>await</code> completes before the next) — there is no <code>asyncio.gather</code> fan-out inside a single add. The async <code>add()</code> also accepts an extra <code>llm=</code> kwarg used only by <code>_create_procedural_memory</code> (LangChain ChatModel support).</p>
+</details>
+</section>
+
+<section id="search-path">
+<h2>The search() path</h2>
+<p class="lead"><code>search()</code> validates and (optionally) translates advanced metadata filters, emits telemetry, then delegates to <code>_search_vector_store()</code>, which runs a three-signal hybrid retrieval — semantic, BM25 keyword, entity boost — and fuses the scores additively in <code>score_and_rank()</code>. Optional reranking runs last.</p>
+
+<h3 id="search-entry">Entry &amp; filter processing</h3>
+<p><code>search(query, *, top_k=20, filters=None, threshold=0.1, rerank=False)</code>:</p>
+<ul>
+<li>Rejects top-level entity kwargs (<code>_reject_top_level_entity_params</code>); validates <code>threshold ∈ [0,1]</code> and non-negative integer <code>top_k</code> (<code>_validate_search_params</code>); requires one session id in <code>filters</code>.</li>
+<li>If <code>_has_advanced_operators(filters)</code> detects logical (<code>AND</code>/<code>OR</code>/<code>NOT</code>), comparison (<code>eq</code>, <code>ne</code>, <code>gt</code>, <code>gte</code>, <code>lt</code>, <code>lte</code>, <code>in</code>, <code>nin</code>, <code>contains</code>, <code>icontains</code>), or wildcard (<code>"*"</code>) operators, <code>_process_metadata_filters</code> rewrites them into a vector-store-neutral form (<code>$or</code>/<code>$not</code> for logical groups). See <a href="vector-stores.html#interface">the vector store interface</a>.</li>
+<li>Fires <code>capture_event("mem0.search", ...)</code>, then calls <code>_search_vector_store(query, effective_filters, limit, threshold)</code>.</li>
+<li>If <code>rerank=True</code> and a reranker is configured, the result list is reranked (see <a href="#search-rerank">reranking</a>).</li>
+</ul>
+
+<h3 id="search-preprocess">Multi-signal retrieval inside _search_vector_store</h3>
+<p>The signals are computed in a fixed sequence of steps. In the <strong>sync</strong> implementation they run one after another on the calling thread; the parallelism is logical, not concurrent.</p>
+<dl>
+<dt>Step 1 — Query preprocessing</dt>
+<dd><code>query_lemmatized = lemmatize_for_bm25(query)</code> (spaCy lemmatizer, drops stopwords/punctuation, also keeps original <code>-ing</code> forms) and <code>query_entities = extract_entities(query)</code> (spaCy NER / noun-compound extraction). See <a href="memory-algorithm.html#entity-linking">entity extraction</a>.</dd>
+<dt>Step 2 — Embed query</dt>
+<dd><code>embeddings = embedding_model.embed(query, "search")</code>.</dd>
+<dt>Step 3 — Semantic search (over-fetch)</dt>
+<dd><code>internal_limit = max(limit * 4, 60)</code> — the store is queried for a much larger candidate pool than <code>top_k</code> so that the BM25 and entity signals have room to re-rank. <code>vector_store.search(query, vectors=embeddings, top_k=internal_limit, filters=filters)</code>.</dd>
+<dt>Step 4 — Keyword / BM25 search</dt>
+<dd><code>vector_store.keyword_search(query=query_lemmatized, top_k=internal_limit, filters=filters)</code>. The base implementation in <code>mem0/vector_stores/base.py</code> returns <code>None</code> — only stores that override it participate, so BM25 is opportunistic.</dd>
+<dt>Step 5 — Normalize BM25</dt>
+<dd>If keyword results exist, <code>get_bm25_params(query, lemmatized=...)</code> picks a sigmoid <code>(midpoint, steepness)</code> by query length, and each raw score is squashed into <code>[0,1]</code> via <code>normalize_bm25</code> (logistic sigmoid). Stored as <code>bm25_scores: id → score</code>.</dd>
+<dt>Step 6 — Entity boosts</dt>
+<dd>If the query yielded entities, <code>_compute_entity_boosts(query_entities, filters)</code> embeds each (de-duplicated, max 8) entity, searches the entity store (<code>top_k=500</code>), keeps matches with similarity <code>&gt;= 0.5</code>, and for each linked memory accumulates a <code>max</code> boost. The boost is <code>similarity * ENTITY_BOOST_WEIGHT * memory_count_weight</code> where <code>ENTITY_BOOST_WEIGHT = 0.5</code> and <code>memory_count_weight = 1 / (1 + 0.001 * (num_linked - 1)²)</code> — a spread-attenuation that down-weights promiscuous entities linked to many memories.</dd>
+<dt>Step 7 — Candidate set</dt>
+<dd>Semantic results become candidate dicts <code>{"id", "score", "payload"}</code>. The candidate pool is seeded <em>only</em> from semantic results — a memory that matches BM25/entity but is absent from the semantic top-<code>internal_limit</code> cannot surface.</dd>
+<dt>Step 8 — Fuse &amp; rank</dt>
+<dd><code>score_and_rank(semantic_results=candidates, bm25_scores, entity_boosts, threshold, top_k)</code> (in <code>mem0/utils/scoring.py</code>).</dd>
+<dt>Step 9 — Format</dt>
+<dd>Each survivor is shaped into a <code>MemoryItem</code> dict (id, memory, hash, created_at, updated_at, score), with promoted keys (<code>user_id</code>, <code>agent_id</code>, <code>run_id</code>, <code>actor_id</code>, <code>role</code>) lifted out and remaining payload fields nested under <code>metadata</code>. Candidates whose payload lacks <code>data</code> are dropped.</dd>
+</dl>
+
+<h3 id="search-fusion">Score fusion math</h3>
+<p><code>score_and_rank</code> gates on the <strong>semantic</strong> score first — any candidate with <code>semantic_score &lt; threshold</code> is excluded <em>before</em> combining, so BM25/entity boosts cannot rescue a sub-threshold semantic match. The combined score is additive over an adaptive divisor:</p>
+<pre><code class="language-python"># mem0/utils/scoring.py
+max_possible = 1.0
+if has_bm25:   max_possible += 1.0          # → 2.0
+if has_entity: max_possible += 0.5          # ENTITY_BOOST_WEIGHT
+
+raw_combined = semantic_score + bm25_score + entity_boost
+combined = min(raw_combined / max_possible, 1.0)</code></pre>
+<table>
+<thead><tr><th>Active signals</th><th>max_possible divisor</th></tr></thead>
+<tbody>
+<tr><td>Semantic only</td><td>1.0</td></tr>
+<tr><td>Semantic + entity (no BM25)</td><td>1.5</td></tr>
+<tr><td>Semantic + BM25</td><td>2.0</td></tr>
+<tr><td>Semantic + BM25 + entity</td><td>2.5</td></tr>
+</tbody>
+</table>
+<p>The divisor is global per query (determined by whether <em>any</em> BM25/entity scores exist), not per candidate. Results are sorted by combined score descending and truncated to <code>top_k</code>.</p>
+<aside class="callout correctness"><strong>Correctness note: no temporal ranking in search</strong> Despite the algorithm's heavy emphasis on temporal reasoning, <code>score_and_rank</code> performs <em>no</em> recency/temporal weighting — it fuses semantic + BM25 + entity only. Temporal reasoning is entirely an <strong>extraction-time</strong> concern: the <code>ADDITIVE_EXTRACTION_PROMPT</code> instructs the LLM to ground relative references ("last week" → a concrete date) against the Observation Date before storing the fact. So time-awareness is baked into the stored <code>data</code> text, not applied as a ranking signal at query time. See <a href="memory-algorithm.html#temporal-reasoning">the algorithm page</a>.</aside>
+
+<h3 id="search-rerank">Optional reranking</h3>
+<p>When <code>rerank=True</code> and <code>self.reranker</code> is set (configured via <code>RerankerFactory</code>), <code>reranker.rerank(query, original_memories, limit)</code> reorders the fused results. Failures are caught and the original order is kept. Providers live under <code>mem0/reranker/</code> (Cohere, HuggingFace, sentence-transformer, LLM, ZeroEntropy). See <a href="rerankers.html">the rerankers page</a>.</p>
+
+<h3 id="search-sequence">SEARCH sequence diagram</h3>
+<pre class="mermaid">sequenceDiagram
+    participant Caller
+    participant Search as Memory.search
+    participant SVS as _search_vector_store
+    participant Lemma as lemmatize_for_bm25
+    participant NER as extract_entities
+    participant Emb as Embedder
+    participant VS as VectorStore
+    participant ES as EntityStore
+    participant Score as score_and_rank
+    participant RR as Reranker
+
+    Caller->>Search: search(query, filters, threshold, rerank)
+    Search->>Search: validate filters and operators
+    Search->>SVS: _search_vector_store(...)
+
+    SVS->>Lemma: lemmatize query
+    SVS->>NER: extract query entities
+    SVS->>Emb: embed(query, "search")
+
+    par semantic
+        SVS->>VS: search top_k = max(limit*4, 60)
+    and keyword BM25
+        SVS->>VS: keyword_search(lemmatized)
+    and entity boosts
+        SVS->>ES: search per entity top_k=500
+    end
+
+    SVS->>SVS: normalize_bm25 sigmoid
+    SVS->>SVS: spread-attenuated entity boosts
+    SVS->>Score: fuse semantic + bm25 + entity / max_possible
+    Score-->>SVS: top_k ranked
+    SVS->>SVS: format MemoryItem dicts
+    SVS-->>Search: original_memories
+
+    opt rerank == True and reranker set
+        Search->>RR: rerank(query, results, limit)
+        RR-->>Search: reordered
+    end
+    Search-->>Caller: results
+</pre>
+
+<details>
+<summary>Deep dive: AsyncMemory differences on the search path</summary>
+<p><code>AsyncMemory._search_vector_store</code> wraps each of the three signal computations in <code>asyncio.to_thread</code>: <code>lemmatize_for_bm25</code>, <code>extract_entities</code>, <code>embedding_model.embed</code>, <code>vector_store.search</code>, and <code>vector_store.keyword_search</code> each run on the executor. Entity boosts use <code>_compute_entity_boosts_async</code>, which <code>await</code>s <code>embedding_model.embed</code> and <code>entity_store.search</code> per entity via <code>asyncio.to_thread</code>. The steps are still issued <strong>sequentially</strong> (each <code>await</code>ed in turn) — the diagram's <code>par</code> block is the logical signal model, not literal concurrency. The fusion (<code>score_and_rank</code>) is pure CPU and runs inline. Reranking, when enabled, is dispatched with <code>await asyncio.to_thread(self.reranker.rerank, ...)</code> so a slow reranker does not block the event loop. The one place <code>asyncio.gather</code> appears is <code>AsyncMemory.delete_all</code>, which fans out <code>_delete_memory</code> coroutines concurrently.</p>
+</details>
+</section>
+
+<section id="read-write-helpers">
+<h2>get / get_all / update / delete / history</h2>
+<p class="lead">The remaining public methods are direct CRUD over the vector store and SQLite, each emitting telemetry and (for mutations) writing a history row and cleaning up the entity store.</p>
+
+<h3 id="reads">Reads: get &amp; get_all</h3>
+<dl>
+<dt><code>get(memory_id)</code></dt>
+<dd><code>vector_store.get(vector_id=...)</code>; returns <code>None</code> if missing. Builds a <code>MemoryItem</code> dict, promotes session/actor/role keys, nests the rest under <code>metadata</code>. No scoring. Async wraps the get in <code>asyncio.to_thread</code>.</dd>
+<dt><code>get_all(*, filters, top_k=20)</code></dt>
+<dd>Validates filters and <code>top_k</code>, then <code>_get_all_from_vector_store</code> calls <code>vector_store.list(filters, top_k)</code>. It defensively unwraps the result because stores return either a flat list or a <code>(list, ...)</code> tuple. Same <code>MemoryItem</code> formatting as <code>get</code>, but score is excluded.</dd>
+</dl>
+
+<h3 id="writes">Mutations: update, delete, delete_all</h3>
+<dl>
+<dt><code>update(memory_id, data, metadata=None)</code></dt>
+<dd>Embeds <code>data</code> with action <code>"update"</code> and calls <code>_update_memory</code>: fetches the existing memory, preserves <code>created_at</code> and any session/actor/role ids not overridden, recomputes <code>hash</code> and <code>text_lemmatized</code>, sets a fresh <code>updated_at</code>, calls <code>vector_store.update(...)</code>, writes an <code>UPDATE</code> history row, then <strong>re-links entities</strong>: <code>_remove_memory_from_entity_store(...)</code> strips the id from stale entity records and <code>_link_entities_for_memory(...)</code> re-extracts entities from the new text and links them back.</dd>
+<dt><code>delete(memory_id)</code></dt>
+<dd>Fetches the memory (raises <code>ValueError</code> if absent), then <code>_delete_memory</code>: deletes the vector, writes a <code>DELETE</code> history row with <code>is_deleted=1</code> (preserving <code>created_at</code> normalized to UTC and the prior <code>data</code> as <code>old_memory</code>), then strips the id from the entity store.</dd>
+<dt><code>delete_all(user_id, agent_id, run_id)</code></dt>
+<dd>Requires at least one filter (otherwise points the caller to <code>reset()</code>). Lists matching memories and deletes each via <code>_delete_memory</code>. Sync loops serially; <code>AsyncMemory.delete_all</code> builds a list of <code>_delete_memory</code> coroutines and runs them via <code>asyncio.gather(*delete_tasks)</code>.</dd>
+</dl>
+
+<h3 id="history">history(memory_id)</h3>
+<p>Returns <code>db.get_history(memory_id)</code> — the full ADD/UPDATE/DELETE audit trail for one memory, ordered by <code>created_at ASC, DATETIME(updated_at) ASC</code>. The SQLite <code>history</code> table (see <code>mem0/memory/storage.py</code>) carries <code>id, memory_id, old_memory, new_memory, event, created_at, updated_at, is_deleted, actor_id, role</code>. <code>SQLiteManager</code> guards all writes with a <code>threading.Lock</code> and explicit <code>BEGIN/COMMIT/ROLLBACK</code>; the connection is opened with <code>check_same_thread=False</code> so it is usable from <code>asyncio.to_thread</code> worker threads.</p>
+<aside class="callout gotcha"><strong>Gotcha</strong> The entity-store cleanup helpers are no-ops when <code>self._entity_store is None</code> — the entity store is lazily created on first use. If a process only ever calls <code>delete()</code> without having added/searched (which would have initialized the entity store), the cleanup short-circuits harmlessly. Entity cleanup errors are always swallowed (debug/warning level) so they never break the primary delete/update.</aside>
+</section>
+
+<section id="storage-layer">
+<h2>SQLite storage layer</h2>
+<p class="lead"><code>mem0/memory/storage.py</code> defines <code>SQLiteManager</code>, backing two tables that serve the data flow: <code>history</code> (the audit trail surfaced by <code>history()</code>) and <code>messages</code> (the short-term conversation buffer feeding Phase 0 of add).</p>
+<dl>
+<dt>History writes</dt>
+<dd><code>add_history(...)</code> inserts one row; <code>batch_add_history(records)</code> uses <code>executemany</code> for the V3 pipeline's bulk ADD. Both assign a fresh UUID per row and wrap the insert in a transaction.</dd>
+<dt>Messages buffer</dt>
+<dd><code>save_messages(messages, session_scope)</code> inserts the raw turns, then evicts everything beyond the most recent 10 for that scope using a derived-table subquery (forcing SQLite to materialize the <code>ORDER BY</code> before the outer <code>NOT IN</code>). <code>get_last_messages(scope, limit=10)</code> reads the latest N and re-sorts them chronologically for the prompt.</dd>
+<dt>Schema migration</dt>
+<dd><code>_migrate_history_table</code> detects a legacy group-chat schema, renames the old table, recreates the current schema, copies the intersecting columns, and drops the old table — all inside one transaction with rollback on error.</dd>
+</dl>
+<aside class="callout perf"><strong>Perf</strong> The 10-message cap on the <code>messages</code> table keeps the Phase-0 context bounded and the table small. Combined with <code>get_last_messages</code>'s subquery (latest-N DESC, then ASC re-sort), the engine always feeds the extraction LLM a fixed-size, chronologically ordered recent-history window regardless of how long a session runs.</aside>
+</section>

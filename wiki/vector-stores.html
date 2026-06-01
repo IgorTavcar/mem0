@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="The vector store layer persists each mem0 memory as a dense embedding plus a flat JSON payload across 24 pluggable backends behind one abstract interface, VectorStoreBase. Stores share an insert/search/get/list/delete/update contract plus collection lifecycle ops, and an enhanced filter dialect (comparison, list, string, and AND/OR/NOT logical operators) that each provider translates natively. Qdrant is the default and richest implementation with hybrid dense + BM25 sparse search; pgvector ships rich SQL filter operators; 15 of 24 providers add native keyword/BM25 search consumed by the hybrid retrieval algorithm.">
+<meta name="generator" content="mem0-wiki-build">
+<title>Vector Stores · mem0 wiki</title>
+<script>(function(){try{var t=localStorage.getItem('mem0-wiki-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();</script>
+<link rel="stylesheet" href="style.css">
+<script type="application/ld+json">{"@context": "https://schema.org", "@type": "TechArticle", "headline": "Vector Stores", "description": "The vector store layer persists each mem0 memory as a dense embedding plus a flat JSON payload across 24 pluggable backends behind one abstract interface, VectorStoreBase. Stores share an insert/search/get/list/delete/update contract plus collection lifecycle ops, and an enhanced filter dialect (comparison, list, string, and AND/OR/NOT logical operators) that each provider translates natively. Qdrant is the default and richest implementation with hybrid dense + BM25 sparse search; pgvector ships rich SQL filter operators; 15 of 24 providers add native keyword/BM25 search consumed by the hybrid retrieval algorithm.", "keywords": "vector store, VectorStoreBase, VectorStoreFactory, qdrant default, pgvector filter operators, OPERATOR_SQL_MAP, keyword_search BM25, hybrid search, metadata filters AND OR NOT, OutputData, payload model, text_lemmatized", "isPartOf": {"@type": "WebSite", "name": "mem0 wiki", "url": "index.html"}}</script>
+</head>
+<body>
+<a class="skip" href="#content">Skip to content</a>
+<header class="topbar">
+  <button id="menu-toggle" class="icon-btn" aria-label="Toggle navigation">&#9776;</button>
+  <a class="brand" href="index.html">mem0&nbsp;<span>wiki</span></a>
+  <div class="search" role="search">
+    <input id="search-input" type="search" placeholder="Search the wiki…  ( / )" autocomplete="off" aria-label="Search">
+    <div id="search-results" role="listbox"></div>
+  </div>
+  <button id="theme-toggle" class="icon-btn" aria-label="Toggle theme">&#9680;</button>
+  <a class="gh" href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">GitHub&nbsp;&#8599;</a>
+</header>
+<div class="layout">
+  <aside class="sidebar" id="sidebar" aria-label="Site navigation">
+    <div class="nav-group"><a href="index.html">&#127968; Home</a></div>
+<div class="nav-group"><div class="nav-label">Overview</div><a href="architecture.html">Architecture Overview</a><a href="data-flow.html">Data Flow</a></div>
+<div class="nav-group"><div class="nav-label">Core</div><a href="memory-engine.html">Memory Engine</a><a href="memory-algorithm.html">Memory Algorithm</a><a href="config-system.html">Configuration System</a></div>
+<div class="nav-group"><div class="nav-label">Providers</div><a href="llms.html">LLM Providers</a><a href="embeddings.html">Embedding Providers</a><a href="vector-stores.html" class="active">Vector Stores</a><a href="rerankers.html">Rerankers</a><a href="graph-memory.html">Graph Memory (deprecated)</a></div>
+<div class="nav-group"><div class="nav-label">Interfaces</div><a href="client-sdk.html">Hosted Client &amp; Proxy</a><a href="server.html">Self-Hosted Server</a><a href="typescript-sdk.html">TypeScript SDK</a><a href="openmemory.html">OpenMemory Platform</a></div>
+<div class="nav-group"><div class="nav-label">Ecosystem</div><a href="integrations.html">Integrations &amp; Ecosystem</a><a href="evaluation.html">Evaluation &amp; Benchmarks</a></div>
+<div class="nav-group"><div class="nav-label">Meta</div><a href="surprises.html">Surprises &amp; Gotchas</a><a href="glossary.html">Glossary &amp; Concept Index</a></div>
+  </aside>
+  <main class="content" id="content">
+    <nav class="breadcrumb" aria-label="Breadcrumb"><a href="index.html">Home</a><span class="sep">/</span><span>Providers</span><span class="sep">/</span><span>Vector Stores</span></nav>
+    <h1>Vector Stores</h1>
+<p class="lead">The vector store layer is the persistence and retrieval backbone of mem0: every memory is a dense embedding plus a JSON payload, written to and queried from one of 24 pluggable backends behind a single abstract interface, <code>VectorStoreBase</code>. Stores share a common <code>insert</code> / <code>search</code> / <code>get</code> / <code>list</code> / <code>delete</code> / <code>update</code> contract plus collection lifecycle ops, and an enhanced filter dialect (comparison, list, string, and AND/OR/NOT logical operators) that each provider translates into its native query language. Qdrant is the default and the richest implementation (hybrid dense + BM25 sparse search); pgvector ships rich SQL filter operators; about two-thirds of providers add native keyword/BM25 search used by the <a href="memory-algorithm.html">hybrid retrieval algorithm</a>.</p>
+
+<section id="overview">
+<h2>Role in the system</h2>
+<p>The vector store is one of the four pluggable provider families wired by the <a href="config-system.html">configuration system</a>, alongside <a href="llms.html">LLMs</a>, <a href="embeddings.html">embeddings</a>, and <a href="rerankers.html">rerankers</a>. The <a href="memory-engine.html">Memory engine</a> owns exactly one vector store instance (<code>self.vector_store</code>) and calls into it during both <code>add()</code> and <code>search()</code>.</p>
+<ul>
+<li><strong>On add</strong>: the engine extracts memory facts, embeds them via the embedding model, builds a payload, and calls <code>vector_store.insert(vectors, payloads, ids)</code>. See <a href="data-flow.html">the data flow</a>.</li>
+<li><strong>On search</strong>: the engine embeds the query and calls <code>vector_store.search(query, vectors, top_k, filters)</code>, optionally also <code>vector_store.keyword_search(...)</code> for the BM25 leg of hybrid retrieval, then fuses scores. See <a href="memory-algorithm.html">the algorithm</a>.</li>
+<li><strong>Lifecycle</strong>: <code>get</code>, <code>list</code>, <code>update</code>, <code>delete</code>, and <code>reset</code> back the corresponding public Memory methods and the history table.</li>
+</ul>
+<aside class="callout insight"><strong>Insight</strong> The store is responsible only for vectors + payloads. There is no LLM, no extraction, no scoring logic inside a provider class — those live in the engine. A provider's entire job is to faithfully translate the common interface into one backend's API and return results in a shape the engine can read (<code>.id</code>, <code>.score</code>, <code>.payload</code>).</li></aside>
+</section>
+
+<section id="interface">
+<h2>The common interface: <code>VectorStoreBase</code></h2>
+<p>Defined in <code>mem0/vector_stores/base.py</code> as an <code>ABC</code>. Every provider subclasses it and must implement the abstract methods; two methods have default (overridable) implementations.</p>
+
+<h3>Abstract methods (must implement)</h3>
+<dl>
+<dt><code>create_col(self, name, vector_size, distance)</code></dt><dd>Create a collection/index/table. Signatures vary per provider (Qdrant uses <code>create_col(vector_size, on_disk, distance)</code>; PGVector takes no args and reads instance state) — the base signature is nominal, not enforced at the type level.</dd>
+<dt><code>insert(self, vectors, payloads=None, ids=None)</code></dt><dd>Bulk upsert: three parallel lists. The engine always supplies all three.</dd>
+<dt><code>search(self, query, vectors, top_k=5, filters=None)</code></dt><dd>Dense ANN search. Note both <code>query</code> (raw text) and <code>vectors</code> (the embedding) are passed; pure vector stores ignore <code>query</code>, while hybrid-capable stores may use it.</dd>
+<dt><code>get(self, vector_id)</code> / <code>delete(self, vector_id)</code> / <code>update(self, vector_id, vector=None, payload=None)</code></dt><dd>Single-record CRUD by id. <code>update</code> supports vector-only, payload-only, or both.</dd>
+<dt><code>list(self, filters=None, top_k=None)</code></dt><dd>Enumerate memories matching filters (no query vector). Used for unfiltered "get all" style reads and the engine's bookkeeping.</dd>
+<dt><code>list_cols()</code> / <code>delete_col()</code> / <code>col_info()</code></dt><dd>Collection-level metadata operations.</dd>
+<dt><code>reset(self)</code></dt><dd>Documented as "delete the collection and recreate it" — the canonical implementation calls <code>self.delete_col()</code> then <code>self.create_col(...)</code>.</dd>
+</dl>
+
+<h3>Default methods (optional override)</h3>
+<dl>
+<dt><code>keyword_search(self, query, top_k=5, filters=None) -> None</code></dt><dd>BM25 / full-text keyword search. The base returns <code>None</code>, signalling "not supported." Stores that override it return results in the <em>same shape</em> as <code>search()</code>. The docstring notes the query "should be lemmatized for best results" — the engine pre-lemmatizes via <code>lemmatize_for_bm25</code>.</dd>
+<dt><code>search_batch(self, queries, vectors_list, top_k=1, filters=None)</code></dt><dd>Batch multi-query search. The base loops over <code>search()</code> sequentially. Only <strong>Qdrant</strong> overrides it with a native batched call (<code>query_batch_points</code>).</dd>
+</dl>
+<aside class="callout gotcha"><strong>Gotcha</strong> <code>keyword_search</code> returning <code>None</code> is a deliberate sentinel, not an error. The engine checks <code>if keyword_results is not None</code> before computing BM25 scores — so a store without keyword support silently degrades to pure semantic search, no exception raised. Don't return <code>[]</code> from an unsupported store; that would falsely claim "supported, zero hits."</aside>
+</section>
+
+<section id="registration">
+<h2>Registration and instantiation</h2>
+<p>There is no plugin auto-discovery. Two hand-maintained maps must agree for a provider to work:</p>
+<ol>
+<li><strong>Config map</strong> — <code>VectorStoreConfig._provider_configs</code> in <code>mem0/vector_stores/configs.py</code> maps a provider string to its Pydantic config class (e.g. <code>"qdrant" -&gt; "QdrantConfig"</code>), which lives under <code>mem0/configs/vector_stores/&lt;provider&gt;.py</code>.</li>
+<li><strong>Class map</strong> — <code>VectorStoreFactory.provider_to_class</code> in <code>mem0/utils/factory.py</code> maps the same string to a fully-qualified implementation class path (e.g. <code>"qdrant" -&gt; "mem0.vector_stores.qdrant.Qdrant"</code>), loaded lazily via <code>load_class</code>.</li>
+</ol>
+<aside class="callout gotcha"><strong>Gotcha — keep both maps in sync</strong> The two maps must list the same provider keys (they currently agree on all 24). Note the keys point at different naming conventions: the config map gives a bare class name resolved <em>relative</em> to <code>mem0.configs.vector_stores.&lt;provider&gt;</code> (e.g. <code>"neptune" -&gt; "NeptuneAnalyticsConfig"</code>), while the factory gives a <em>fully-qualified</em> implementation path (e.g. <code>"neptune" -&gt; "mem0.vector_stores.neptune_analytics.NeptuneAnalyticsVector"</code>). Adding a provider means editing <em>both</em> maps plus creating the config module; forgetting the config entry yields "Unsupported vector store provider," forgetting the factory entry yields the same error from <code>VectorStoreFactory.create</code>.</aside>
+
+<details><summary>Deep dive: how <code>VectorStoreConfig</code> validates and constructs</summary>
+<p>The <code>@model_validator(mode="after")</code> hook <code>validate_and_create_config</code> does the work: it rejects unknown providers, dynamically <code>__import__</code>s the provider config module, and — for file-backed stores — auto-injects a default <code>path</code> of <code>/tmp/&lt;provider&gt;</code> if the config class declares a <code>path</code> annotation and none was supplied. It then replaces the raw dict with a typed config instance. The factory later does <code>config.model_dump()</code> and splats it as kwargs into the provider constructor, so every provider's <code>__init__</code> parameters must mirror its config fields.</p>
+<pre><code class="language-python"># configs.py (paraphrased)
+if "path" not in config and "path" in config_class.__annotations__:
+    config["path"] = f"/tmp/{provider}"
+self.config = config_class(**config)</code></pre>
+</details>
+</section>
+
+<section id="providers">
+<h2>The 24 providers</h2>
+<p>Counted directly from <code>mem0/vector_stores/</code> (excluding <code>base.py</code>, <code>configs.py</code>, <code>__init__.py</code>). All 24 appear in <code>VectorStoreFactory.provider_to_class</code>:</p>
+<p><code>qdrant</code> (default), <code>chroma</code>, <code>pgvector</code>, <code>pinecone</code>, <code>milvus</code>, <code>mongodb</code>, <code>redis</code>, <code>valkey</code>, <code>elasticsearch</code>, <code>opensearch</code>, <code>weaviate</code>, <code>faiss</code>, <code>azure_ai_search</code>, <code>azure_mysql</code>, <code>databricks</code>, <code>vertex_ai_vector_search</code>, <code>supabase</code>, <code>upstash_vector</code>, <code>s3_vectors</code>, <code>baidu</code>, <code>cassandra</code>, <code>neptune</code> (Neptune Analytics), <code>langchain</code>, <code>turbopuffer</code>.</p>
+<aside class="callout decision"><strong>Design</strong> Two providers are "meta" adapters rather than direct backends: <code>langchain</code> wraps any LangChain <code>VectorStore</code> object (delegating to <code>similarity_search_by_vector</code>), and <code>s3_vectors</code> targets Amazon S3 Vectors. <code>valkey</code> is a Redis-compatible fork with its own dedicated implementation (~32 KB, the largest provider file). <code>turbopuffer</code> (PR #4428) and the rich-operator pgvector rework are among the most recent additions.</aside>
+
+<h3>Provider import strategy</h3>
+<p>Every provider does a top-level import of its client SDK and raises a clear <code>ImportError</code> with the right <code>pip install</code> hint if the optional dependency is missing (e.g. turbopuffer, langchain, qdrant). This keeps the core install slim — you only pull the SDK for the store you actually use.</p>
+</section>
+
+<section id="payload-model">
+<h2>The payload / metadata model</h2>
+<p>mem0 stores a flat JSON payload alongside each vector. The engine builds it in <code>memory/main.py</code> at insert time. The canonical core keys are:</p>
+<dl>
+<dt><code>data</code></dt><dd>The memory text itself (the human-readable fact).</dd>
+<dt><code>hash</code></dt><dd>MD5 of <code>data</code>, used for batch and cross-run dedup before insert.</dd>
+<dt><code>text_lemmatized</code></dt><dd>Lemmatized form of <code>data</code> (via <code>lemmatize_for_bm25</code>). This is the field BM25 / full-text indexes are built on — Qdrant encodes it into a sparse vector, pgvector builds a GIN <code>to_tsvector</code> index over it.</dd>
+<dt><code>created_at</code> / <code>updated_at</code></dt><dd>ISO-8601 timestamps (UTC).</dd>
+<dt><code>user_id</code> / <code>agent_id</code> / <code>run_id</code> / <code>actor_id</code> / <code>attributed_to</code></dt><dd>Scoping/partition identifiers. Several stores (Qdrant, Redis) index these specifically for fast filtering.</dd>
+</dl>
+<p>Arbitrary user metadata is merged into the same flat dict. The engine tracks a set of <code>core_and_promoted_keys</code> (<code>data, hash, created_at, updated_at, id, text_lemmatized, attributed_to</code> + promoted keys) to separate first-class fields from free-form metadata when reconstructing results.</p>
+<aside class="callout perf"><strong>Performance</strong> Because <code>text_lemmatized</code> is precomputed at write time, keyword search never has to re-tokenize the corpus at query time — it only lemmatizes the incoming query. This is what makes hybrid search cheap enough to run on every <code>search()</code>.</aside>
+
+<details><summary>Deep dive: Redis's non-flat storage</summary>
+<p>Redis is the notable exception to "flat payload." Its <code>insert</code> promotes a fixed schema (<code>memory_id</code>, <code>hash</code>, <code>memory</code>, <code>created_at</code>, <code>user_id</code>/<code>agent_id</code>/<code>run_id</code>, <code>embedding</code>) and JSON-encodes everything else into a single <code>metadata</code> text field, excluding the keys in <code>excluded_keys</code> (<code>user_id, agent_id, run_id, hash, data, created_at, updated_at</code>). On read it reverses this: rebuilds <code>data</code> from <code>memory</code>, converts the integer timestamps back to ISO strings, and spreads the decoded <code>metadata</code> back into the payload. Timestamps are stored as integer Unix epochs in <code>numeric</code> fields, which is why Redis must convert in both directions.</p>
+</details>
+</section>
+
+<section id="output-shape">
+<h2>The result shape: <code>OutputData</code> and friends</h2>
+<p>The engine reads results duck-typed by attribute: <code>result.id</code>, <code>result.score</code>, <code>result.payload</code>. There is <strong>no single shared result class</strong> — instead each provider defines its own lightweight container that exposes those three attributes:</p>
+<ul>
+<li>Many providers define a local <code>class OutputData(BaseModel)</code> with <code>id: Optional[str]</code>, <code>score: Optional[float]</code>, <code>payload: Optional[dict]</code> (pgvector, faiss, turbopuffer, pinecone, milvus, weaviate, mongodb, supabase, elasticsearch, opensearch, baidu, cassandra, azure_ai_search, azure_mysql, s3_vectors, upstash_vector, langchain, neptune, vertex_ai_vector_search, valkey).</li>
+<li>Redis defines a plain <code>class MemoryResult</code> with the same three attributes.</li>
+<li>Qdrant returns native <code>qdrant_client</code> point objects directly (which already carry <code>.id</code>, <code>.score</code>, <code>.payload</code>) — no wrapper class at all.</li>
+</ul>
+<aside class="callout gotcha"><strong>Gotcha — <code>list()</code> return nesting</strong> <code>list()</code> is inconsistent across providers. Several (pgvector, turbopuffer, redis) return a <em>doubly-nested</em> list <code>[[OutputData, ...]]</code>, while Qdrant's <code>list()</code> returns the raw <code>scroll()</code> tuple <code>(points, next_offset)</code>. <code>search()</code> by contrast returns a flat list. Callers must know which method they're using; the engine handles the unwrapping.</aside>
+<aside class="callout gotcha"><strong>Score sign convention</strong> <code>score</code> is provider-defined and not normalized. pgvector returns cosine <em>distance</em> (<code>vector &lt;=&gt; %s</code>, lower is closer); turbopuffer converts distance to similarity as <code>1 - dist</code>; Redis returns raw <code>vector_distance</code>. The engine's score fusion accounts for this, but raw <code>.score</code> values are not comparable across stores.</aside>
+</section>
+
+<section id="filters">
+<h2>How filters work</h2>
+<p>mem0 exposes an enhanced, store-agnostic filter dialect. The engine normalizes user filters in <code>Memory._process_metadata_filters()</code> (in <code>memory/main.py</code>), then each provider translates the normalized dict into its backend's native query.</p>
+
+<h3>Supported operators</h3>
+<dl>
+<dt>Equality / shorthand</dt><dd><code>{"user_id": "alice"}</code> — scalar equality. A bare list <code>{"field": ["a","b"]}</code> is treated as an <code>in</code> by some stores (e.g. Qdrant, pgvector).</dd>
+<dt>Comparison</dt><dd><code>eq</code>, <code>ne</code>, <code>gt</code>, <code>gte</code>, <code>lt</code>, <code>lte</code> — e.g. <code>{"created_at": {"gte": "2026-01-01"}}</code>.</dd>
+<dt>List membership</dt><dd><code>in</code>, <code>nin</code> — e.g. <code>{"category": {"in": ["a","b"]}}</code>.</dd>
+<dt>String matching</dt><dd><code>contains</code>, <code>icontains</code> (case-insensitive).</dd>
+<dt>Wildcard / existence</dt><dd><code>{"field": "*"}</code> — field exists / match any.</dd>
+<dt>Logical</dt><dd><code>AND</code>, <code>OR</code>, <code>NOT</code> — each takes a <em>list</em> of sub-filter dicts.</dd>
+</dl>
+
+<h3>Engine-side normalization</h3>
+<p><code>_process_metadata_filters</code> maps the operator names through an <code>operator_map</code>, flattens top-level <code>AND</code> into a merged dict (deep-merging same-key operator dicts), and rewrites <code>OR -&gt; "$or"</code> and <code>NOT -&gt; "$not"</code> as pass-through lists for the store to interpret. <code>_has_advanced_operators</code> detects whether a filter needs this richer processing at all.</p>
+<aside class="callout gotcha"><strong>Gotcha — the OR/$or casing duality</strong> The engine renames <code>OR -&gt;$or</code> / <code>NOT -&gt;$not</code>, but the engine also keeps original-cased keys in some <code>effective_filters</code> built from <code>deepcopy(input_filters)</code>. Qdrant's <code>_create_filter</code> therefore normalizes <em>both</em> spellings (<code>$or/$and/$not -&gt; OR/AND/NOT</code>) and deduplicates, explicitly to avoid evaluating the same sub-condition twice. pgvector keys off the <code>$or</code>/<code>$not</code> spelling.</aside>
+
+<h3>Per-store translation: two reference implementations</h3>
+<h4>Qdrant — typed conditions</h4>
+<p><code>_build_field_condition</code> maps each operator to a Qdrant primitive: <code>eq -&gt; MatchValue</code>, <code>ne -&gt; MatchExcept</code>, <code>in -&gt; MatchAny</code>, <code>nin -&gt; MatchExcept</code>, range ops -&gt; <code>Range</code> (or <code>DatetimeRange</code> when all values match an ISO-8601 regex), <code>contains/icontains -&gt; MatchText</code>. <code>_create_filter</code> assembles <code>must</code> (AND), <code>should</code> (OR), <code>must_not</code> (NOT) clauses recursively. Mixing range and non-range operators on one field raises <code>ValueError</code>; the wildcard <code>"*"</code> is dropped (matches all).</p>
+<h4>pgvector — SQL fragment builder</h4>
+<p><code>_build_filter_conditions</code> compiles filters into parameterized SQL via the <code>OPERATOR_SQL_MAP</code> table, all keyed off JSONB <code>payload-&gt;&gt;</code> extraction:</p>
+<pre><code class="language-python">OPERATOR_SQL_MAP = {
+    "eq":  ("payload->>%s = %s", False),
+    "gt":  ("(payload->>%s)::numeric > %s", True),   # numeric coercion
+    "in":  ("payload->>%s = ANY(%s)", False),
+    "contains":  ("payload->>%s LIKE %s",  False),
+    "icontains": ("payload->>%s ILIKE %s", False),
+    # ... ne, gte, lt, lte, nin
+}</code></pre>
+<p>It handles <code>$or</code> (OR of AND-groups) and <code>$not</code> recursively, and uses <code>payload ? %s</code> (JSONB key-exists) for the <code>"*"</code> wildcard.</p>
+<aside class="callout security"><strong>Recent hardening (PR #5264, #5263, #4997)</strong> The pgvector filter path was repeatedly fixed for: <strong>boolean filter casing</strong> — booleans are now serialized with <code>json.dumps(value)</code> (yielding <code>"true"</code>/<code>"false"</code> to match how JSONB stores them) instead of Python's <code>"True"</code>/<code>"False"</code>; <strong>LIKE escaping</strong> — <code>contains</code>/<code>icontains</code> values escape <code>\</code>, <code>%</code>, <code>_</code> and append <code>ESCAPE '\'</code> so user input can't inject wildcards; and <strong>SQL injection</strong> — all identifiers use <code>psycopg.sql.Identifier</code> and all values are bound parameters, never string-interpolated.</aside>
+
+<details><summary>Deep dive: FAISS does in-memory post-filtering</summary>
+<p>FAISS has no server-side filter engine. Its <code>search</code> over-fetches (<code>fetch_k = top_k * 2</code> when filters are present) and then calls <code>_apply_filters(payload, filters)</code> on each candidate's payload in Python, keeping only matches. This is correct but means filtered FAISS searches can under-return if the true matches fall outside the over-fetch window — a fundamental limitation of brute-force local indexes.</p>
+</details>
+</section>
+
+<section id="hybrid-search">
+<h2>Hybrid &amp; keyword search</h2>
+<p>The April-2026 OSS pipeline (ported in PR #4805) added native keyword/BM25 search to the store layer so the engine can fuse semantic + lexical signals. See <a href="memory-algorithm.html#multi-signal-retrieval">score fusion in the algorithm</a>.</p>
+
+<h3>How the engine drives it</h3>
+<p>Inside <code>_search_vector_store</code>, the engine: (1) lemmatizes the query, (2) embeds it, (3) over-fetches semantic results with <code>internal_limit = max(limit*4, 60)</code>, (4) calls <code>keyword_search(query=query_lemmatized, ...)</code>, and (5) if that returns non-<code>None</code>, normalizes the BM25 scores and folds them into the additive scoring pool alongside entity boosts and recency. The async engine wraps each blocking store call in <code>asyncio.to_thread</code>.</p>
+
+<h3>Which stores implement <code>keyword_search</code></h3>
+<p>15 providers override the default (verified by grepping <code>def keyword_search</code>, excluding <code>base.py</code>):</p>
+<p><code>qdrant</code>, <code>pgvector</code>, <code>redis</code>, <code>milvus</code>, <code>mongodb</code>, <code>elasticsearch</code>, <code>opensearch</code>, <code>pinecone</code>, <code>weaviate</code>, <code>databricks</code>, <code>baidu</code>, <code>upstash_vector</code>, <code>azure_ai_search</code>, <code>azure_mysql</code>, <code>vertex_ai_vector_search</code>. The remaining 9 (including <code>faiss</code>, <code>chroma</code>, <code>valkey</code>, <code>supabase</code>, <code>turbopuffer</code>, <code>cassandra</code>, <code>s3_vectors</code>, <code>langchain</code>, <code>neptune</code>) inherit the <code>None</code> default and run semantic-only.</p>
+
+<h3>Mechanisms differ by store</h3>
+<dl>
+<dt>Qdrant</dt><dd>True sparse-vector hybrid. Each collection (v3+) gets a named <code>bm25</code> sparse-vector slot with IDF modifier. On insert, <code>text_lemmatized</code> is encoded to a BM25 sparse vector via fastembed (<code>Qdrant/bm25</code>); <code>keyword_search</code> queries <code>using="bm25"</code>.</dd>
+<dt>pgvector</dt><dd>PostgreSQL full-text search: a GIN index over <code>to_tsvector('simple', payload-&gt;&gt;'text_lemmatized')</code>, ranked by <code>ts_rank_cd</code> with <code>plainto_tsquery</code>.</dd>
+<dt>Redis</dt><dd>RediSearch <code>TextQuery</code> over the <code>memory</code> text field.</dd>
+</dl>
+<aside class="callout gotcha"><strong>Gotcha — Qdrant collections predating v3</strong> Collections created before the hybrid-search work lack the <code>bm25</code> sparse slot. Writing a BM25 vector into them is rejected ("Not existing vector name error: bm25"), so Qdrant detects this on init (<code>_has_bm25_slot</code>), logs a warning, and disables BM25 for that collection — semantic search still works. To get hybrid, use a fresh collection. The fastembed dependency is also optional and lazy-loaded; if it's not installed, BM25 is silently disabled with an install hint.</aside>
+</section>
+
+<section id="default-qdrant">
+<h2>The default store: Qdrant</h2>
+<p><code>VectorStoreConfig.provider</code> defaults to <code>"qdrant"</code> and with no other config it runs an embedded local instance writing to a <code>path</code> (auto-defaulted to <code>/tmp/qdrant</code>). It is the most feature-complete provider:</p>
+<ul>
+<li><strong>Hybrid by default</strong>: collections are created with both dense (<code>VectorParams</code>, cosine) and named <code>bm25</code> sparse slots.</li>
+<li><strong>Native batch search</strong>: the only store overriding <code>search_batch</code>, using <code>query_batch_points</code> with a sequential fallback on error.</li>
+<li><strong>Payload indexes</strong>: on remote servers it auto-creates keyword indexes for <code>user_id</code>, <code>agent_id</code>, <code>run_id</code>, <code>actor_id</code> to accelerate filtering. Local (embedded) Qdrant skips index creation — it isn't supported there.</li>
+<li><strong>Datetime-aware ranges</strong>: range filters whose values are ISO-8601 strings use <code>DatetimeRange</code> instead of numeric <code>Range</code>.</li>
+</ul>
+<aside class="callout perf"><strong>Partial-update caveat</strong> Qdrant's <code>update</code> with only a payload uses <code>set_payload</code>, which cannot refresh the BM25 sparse vector — so a payload-only update leaves any existing BM25 vector stale. The code notes this is acceptable in practice because the v3 engine re-embeds (full update) whenever memory text changes.</aside>
+
+<pre class="mermaid">
+flowchart LR
+  E[Memory engine] -->|insert vectors+payloads| Q[Qdrant]
+  Q -->|dense| D[(dense vector slot)]
+  Q -->|BM25 of text_lemmatized| B[(bm25 sparse slot)]
+  E -->|search: embedding| D
+  E -->|keyword_search: lemmatized query| B
+  D & B --> F[engine score fusion]
+</pre>
+</section>
+
+<section id="comparison">
+<h2>Comparison matrix</h2>
+<p>Hybrid here means a native <code>keyword_search</code> override (BM25/full-text) usable for the hybrid pipeline. Default <code>create_col</code> distance is cosine for most stores.</p>
+<table>
+<thead><tr><th>Provider</th><th>Keyword search</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td><strong>qdrant</strong> (default)</td><td>Yes (BM25 sparse, fastembed)</td><td>Hybrid by default; only store with native <code>search_batch</code>; auto payload indexes on remote; richest filter translation.</td></tr>
+<tr><td>pgvector</td><td>Yes (PG full-text)</td><td>JSONB payload; rich <code>OPERATOR_SQL_MAP</code>; HNSW/DiskANN index options; psycopg3 or psycopg2; connection pooling. Recently hardened (boolean casing, LIKE escaping, SQLi).</td></tr>
+<tr><td>redis</td><td>Yes (RediSearch text)</td><td>Fixed schema + JSON <code>metadata</code> blob; integer epoch timestamps; tag-based filters via <code>redisvl</code>.</td></tr>
+<tr><td>milvus</td><td>Yes</td><td>—</td></tr>
+<tr><td>mongodb</td><td>Yes</td><td>Atlas vector + text search.</td></tr>
+<tr><td>elasticsearch</td><td>Yes</td><td>—</td></tr>
+<tr><td>opensearch</td><td>Yes</td><td>—</td></tr>
+<tr><td>pinecone</td><td>Yes</td><td>—</td></tr>
+<tr><td>weaviate</td><td>Yes</td><td>—</td></tr>
+<tr><td>databricks</td><td>Yes</td><td>Largest backend integration (~38 KB).</td></tr>
+<tr><td>baidu</td><td>Yes</td><td>Baidu VectorDB.</td></tr>
+<tr><td>upstash_vector</td><td>Yes</td><td>Serverless HTTP vector DB.</td></tr>
+<tr><td>azure_ai_search</td><td>Yes</td><td>—</td></tr>
+<tr><td>azure_mysql</td><td>Yes</td><td>MySQL-backed vectors.</td></tr>
+<tr><td>vertex_ai_vector_search</td><td>Yes</td><td>Google Matching Engine.</td></tr>
+<tr><td>chroma</td><td>No</td><td>Semantic only.</td></tr>
+<tr><td>faiss</td><td>No</td><td>Local brute-force; in-memory post-filtering; JSON docstore with safe-unpickle migration.</td></tr>
+<tr><td>valkey</td><td>No</td><td>Redis-compatible fork; dedicated impl.</td></tr>
+<tr><td>supabase</td><td>No</td><td>Postgres-as-a-service.</td></tr>
+<tr><td>turbopuffer</td><td>No</td><td>Recently added (#4428); namespaces created implicitly; <code>1 - dist</code> score; tuple filter format; limited operators (<code>eq</code>, <code>gte</code>, <code>lte</code>).</td></tr>
+<tr><td>cassandra</td><td>No</td><td>—</td></tr>
+<tr><td>s3_vectors</td><td>No</td><td>Amazon S3 Vectors.</td></tr>
+<tr><td>langchain</td><td>No</td><td>Adapter over any LangChain <code>VectorStore</code>; delegates to <code>similarity_search_by_vector</code>.</td></tr>
+<tr><td>neptune</td><td>No</td><td>Amazon Neptune Analytics.</td></tr>
+</tbody>
+</table>
+<aside class="callout gotcha"><strong>Verify before relying on this table</strong> The keyword-search column was derived from <code>grep "def keyword_search"</code>. Filter-operator coverage varies widely below the surface: turbopuffer only translates <code>eq</code>/<code>gte</code>/<code>lte</code> (its <code>_convert_filters</code> silently drops other operators), while Qdrant and pgvector cover the full set. Treat "Yes" in this table as "implements the method," not "behaves identically to Qdrant."</aside>
+</section>
+
+<section id="lifecycle-reset">
+<h2>Reset and collection lifecycle</h2>
+<p>Each store's <code>reset()</code> drops and recreates its collection — the canonical destructive "start fresh." <code>VectorStoreFactory.reset(instance)</code> provides a factory-level reset entry point used by the engine's <code>Memory.reset()</code>.</p>
+<aside class="callout gotcha"><strong>Gotcha — Redis <code>create_col(overwrite=True)</code></strong> Redis calls <code>index.create(overwrite=True)</code> on every <code>__init__</code>. With <code>overwrite=True</code> on RediSearch this drops the index definition (not necessarily the underlying keys depending on version) — be careful pointing two processes at the same collection name.</aside>
+</section>
+
+<section id="adding-a-store">
+<h2>Adding a new provider (checklist)</h2>
+<ol>
+<li>Create <code>mem0/vector_stores/&lt;name&gt;.py</code> with a class subclassing <code>VectorStoreBase</code>; implement all abstract methods. Lazy/guarded-import the client SDK with a helpful <code>ImportError</code>.</li>
+<li>Define a result container exposing <code>.id</code>, <code>.score</code>, <code>.payload</code> (reuse the local <code>OutputData</code> pattern).</li>
+<li>Implement filter translation from the normalized dialect (<code>$or</code>/<code>$not</code> + operator dicts). Match on <code>text_lemmatized</code> if you want hybrid; override <code>keyword_search</code>.</li>
+<li>Create <code>mem0/configs/vector_stores/&lt;name&gt;.py</code> with a Pydantic config whose fields mirror your <code>__init__</code> params.</li>
+<li>Register in <em>both</em> maps: <code>VectorStoreConfig._provider_configs</code> and <code>VectorStoreFactory.provider_to_class</code>.</li>
+</ol>
+<p>This mirrors the provider plugin pattern used by <a href="llms.html">LLMs</a> and <a href="embeddings.html">embeddings</a>, described in the <a href="architecture.html">architecture overview</a>. For where this all sits in the request path see <a href="data-flow.html">data flow</a> and <a href="memory-engine.html">the memory engine</a>.</p>
+</section><footer class="connections" aria-label="Related pages"><div><h4>Uses</h4><ul><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="config-system.html">Configuration System</a></li></ul></div><div><h4>Used by</h4><ul><li><a href="architecture.html">Architecture Overview</a></li><li><a href="config-system.html">Configuration System</a></li><li><a href="data-flow.html">Data Flow</a></li><li><a href="embeddings.html">Embedding Providers</a></li><li><a href="graph-memory.html">Graph Memory (deprecated)</a></li><li><a href="integrations.html">Integrations &amp; Ecosystem</a></li><li><a href="memory-algorithm.html">Memory Algorithm</a></li><li><a href="memory-engine.html">Memory Engine</a></li><li><a href="openmemory.html">OpenMemory Platform</a></li><li><a href="server.html">Self-Hosted Server</a></li><li><a href="typescript-sdk.html">TypeScript SDK</a></li></ul></div><div><h4>Related</h4><ul><li><a href="llms.html">LLM Providers</a></li><li><a href="rerankers.html">Rerankers</a></li><li><a href="surprises.html">Surprises &amp; Gotchas</a></li></ul></div><div><h4>Source files</h4><ul><li><code>mem0/vector_stores/base.py</code> — Abstract interface: insert/search/get/list/delete/update, create_col/list_cols/delete_col/col_info, reset; default keyword_search (returns None) and search_batch.</li><li><code>mem0/vector_stores/configs.py</code> — Provider-&gt;config-class map (_provider_configs, 24 entries), validate_and_create_config validator, /tmp/&lt;provider&gt; path default injection.</li><li><code>mem0/utils/factory.py</code> — provider_to_class map (24 entries) + create()/reset(); lazy load_class instantiation from config.model_dump().</li><li><code>mem0/vector_stores/qdrant.py</code> — Default store; hybrid dense+BM25 sparse (fastembed Qdrant/bm25), _create_filter / _build_field_condition operator translation, native search_batch, _has_bm25_slot v3 detection, payload indexes.</li><li><code>mem0/vector_stores/pgvector.py</code> — Rich SQL filter operators over JSONB payload, $or/$not handling, boolean casing + LIKE escaping fixes, PG full-text keyword_search on text_lemmatized, HNSW/DiskANN indexes.</li><li><code>mem0/vector_stores/redis.py</code> — Fixed schema + JSON metadata blob, integer epoch timestamps, RediSearch TextQuery keyword_search, tag-based filters via redisvl.</li><li><code>mem0/vector_stores/faiss.py</code> — Local brute-force index, in-memory post-filtering with over-fetch, JSON docstore with safe-unpickle migration.</li><li><code>mem0/vector_stores/turbopuffer.py</code> — Recently added provider; tuple filter format limited to eq/gte/lte, implicit namespace creation, score = 1 - dist.</li><li><code>mem0/memory/main.py</code> — Engine-side filter normalization (OR-&gt;$or, NOT-&gt;$not), payload construction (data/hash/text_lemmatized), and hybrid search orchestration calling search + keyword_search.</li></ul></div></footer><footer class="pagefoot">Generated 2026-06-01 by <code>wiki/_build.py</code> from the mem0 source tree · <a href="concepts.json">concepts.json</a> · <a href="https://github.com/mem0ai/mem0" target="_blank" rel="noopener">mem0ai/mem0</a></footer>
+  </main>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-core.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/plugins/autoloader/prism-autoloader.min.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
